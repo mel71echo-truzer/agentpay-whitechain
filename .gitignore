@@ -4,4 +4,6 @@ __pycache__/
 .venv/
 venv/
 .spend_ledger.json
+.facilitator_used_tx.json
+downloaded_photos/
 *.egg-info/
