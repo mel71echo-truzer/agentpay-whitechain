@@ -16,6 +16,7 @@ x402 (спрощена схема "exact-native", див. config.py): серве
 
 import base64
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,16 @@ from facilitator.whitechain_facilitator import WhitechainFacilitator  # noqa: E4
 app = FastAPI(title="Photobank — x402 seller agent")
 
 IMAGES_DIR = Path(__file__).resolve().parent / "images"
+
+# Суворий whitelist для {name}: тільки латиниця/цифри/дефіс/підкреслення.
+# FastAPI/Starlette і так не пускають "/" у {name}, але ми не покладаємось
+# лише на це — явна перевірка тут не дає жодному майбутньому рефакторингу
+# (наприклад заміні на {name:path}) випадково відкрити path traversal.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# X-PAYMENT — це недовірений вхід від клієнта; реальний payload крихітний
+# (JSON з одним полем txHash), тож обмежуємо розмір з запасом.
+_MAX_PAYMENT_HEADER_LEN = 4096
 
 facilitator = WhitechainFacilitator()
 
@@ -60,12 +71,21 @@ def _payment_requirements(photo_name: str) -> dict:
 
 
 def _decode_payment_header(x_payment: str) -> dict | None:
-    """Декодує заголовок X-PAYMENT (base64 JSON) у dict з полем txHash."""
+    """Декодує заголовок X-PAYMENT (base64 JSON) у dict з полем txHash (рядок).
+
+    Повертає None для будь-якого некоректного/завеликого/неочікуваного
+    вмісту — заголовок повністю недовірений вхід від клієнта.
+    """
+    if len(x_payment) > _MAX_PAYMENT_HEADER_LEN:
+        return None
     try:
         raw = base64.b64decode(x_payment)
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:  # noqa: BLE001 — клієнт міг надіслати сміття
         return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("txHash"), str):
+        return None
+    return parsed
 
 
 @app.get("/photos")
@@ -89,6 +109,9 @@ def balance():
 @app.get("/photo/{name}")
 def get_photo(name: str, request: Request, x_payment: str | None = Header(default=None)):
     """Віддає фото name.png — але тільки після оплати через x402."""
+    if not _SAFE_NAME.fullmatch(name):
+        return JSONResponse(status_code=404, content={"error": "Фото не знайдено."})
+
     image_path = IMAGES_DIR / f"{name}.png"
     if not image_path.exists():
         return JSONResponse(status_code=404, content={"error": f"Фото '{name}' не знайдено."})
@@ -100,7 +123,7 @@ def get_photo(name: str, request: Request, x_payment: str | None = Header(defaul
         )
 
     payment = _decode_payment_header(x_payment)
-    if not payment or "txHash" not in payment:
+    if payment is None:
         return JSONResponse(
             status_code=400,
             content={"error": "Заголовок X-PAYMENT некоректний. Очікується base64 JSON з полем txHash."},
