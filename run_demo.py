@@ -21,7 +21,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 import config
+import photobank.server as photobank_module
 from author.agent import AuthorAgent
+from facilitator.whitechain_facilitator import WhitechainFacilitator
 from photobank.server import app as photobank_app
 from wallets.setup_wallets import check_balance
 
@@ -43,6 +45,11 @@ def _check_config() -> list[str]:
 
 def start_photobank_server():
     import uvicorn
+
+    # Створюємо facilitator тут явно (а не покладаємось на імпорт модуля) —
+    # конструктор одразу перевіряє RPC і chain_id (fail fast), і на цей момент
+    # _check_config() у main() вже підтвердив, що WHITECHAIN_RPC_URL заданий.
+    photobank_module.facilitator = WhitechainFacilitator()
 
     server = uvicorn.Server(
         uvicorn.Config(
