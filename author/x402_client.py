@@ -118,12 +118,17 @@ def pay_and_fetch(
     accept = requirements["accepts"][0]
     pay_to = accept["payTo"]
     amount_wbt = accept["amount_wbt"]
+    resource = accept["resource"]
 
-    log.append(f"Сервер просить оплату: {amount_wbt} WBT на {pay_to}")
+    log.append(f"Сервер просить оплату: {amount_wbt} WBT на {pay_to} за {resource}")
 
     ledger.ensure_can_spend(amount_wbt)
 
-    tx_hash = send_wbt(private_key, pay_to, amount_wbt, w3=w3)
+    # Кладемо назву ресурсу в calldata транзакції — це прив'язує платіж
+    # саме до цього ресурсу назавжди (calldata незмінний після підпису),
+    # тож той самий tx_hash не можна буде пред'явити за ІНШИЙ ресурс
+    # (facilitator звіряє це в expected_resource, див. whitechain_facilitator.py).
+    tx_hash = send_wbt(private_key, pay_to, amount_wbt, w3=w3, data=resource.encode("utf-8"))
     ledger.record(amount_wbt, pay_to, tx_hash)
     log.append(f"Оплачено. TX: {tx_hash}")
 

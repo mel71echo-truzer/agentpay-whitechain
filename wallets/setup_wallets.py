@@ -48,12 +48,19 @@ def send_wbt(
     to_address: str,
     amount_wbt: float,
     w3: Web3 | None = None,
+    data: bytes | None = None,
 ) -> str:
     """Відправляє WBT з одного гаманця на інший. Повертає хеш транзакції.
 
     from_key    — приватний ключ гаманця-відправника (з .env, ніколи не хардкодь)
     to_address  — адреса гаманця-отримувача
     amount_wbt  — сума у WBT (наприклад 0.02)
+    data        — необов'язковий calldata (наприклад назва ресурсу, який
+                  оплачується — див. author/x402_client.py). Прив'язує цю
+                  конкретну транзакцію до конкретного ресурсу назавжди
+                  (calldata незмінний після підпису), тож звичайних
+                  21000 газу для чистого переказу вже не вистачить —
+                  у цьому випадку рахуємо потрібний газ через estimate_gas.
     """
     w3 = w3 or get_web3()
     account = Account.from_key(from_key)
@@ -65,9 +72,14 @@ def send_wbt(
         "value": Web3.to_wei(amount_wbt, "ether"),
         "nonce": w3.eth.get_transaction_count(account.address),
         "chainId": config.WHITECHAIN_CHAIN_ID,
-        "gas": 21000,
         "gasPrice": w3.eth.gas_price,
     }
+    if data:
+        tx["data"] = data
+        tx["gas"] = w3.eth.estimate_gas(tx) + 10_000  # запас про всяк випадок
+    else:
+        tx["gas"] = 21000  # стандартна вартість чистого переказу без calldata
+
     signed_tx = account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)

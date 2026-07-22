@@ -101,8 +101,8 @@ def main() -> None:
         import author.x402_client as x402_client
 
         _real_send_wbt = sw.send_wbt
-        x402_client.send_wbt = lambda pk, to, amt, w3=None, _test_w3=w3: _real_send_wbt(
-            pk, to, amt, w3=w3 or _test_w3
+        x402_client.send_wbt = lambda pk, to, amt, w3=None, data=None, _test_w3=w3: _real_send_wbt(
+            pk, to, amt, w3=w3 or _test_w3, data=data
         )
 
         # 2. Піднімаємо справжній Фотобанк-сервер (FastAPI/uvicorn), тільки локально
