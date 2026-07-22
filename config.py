@@ -27,7 +27,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 WHITECHAIN_RPC_URL = os.getenv("WHITECHAIN_RPC_URL", "")
 WHITECHAIN_CHAIN_ID = _int_env("WHITECHAIN_CHAIN_ID", 2625)
 WHITECHAIN_EXPLORER_URL = os.getenv(
-    "WHITECHAIN_EXPLORER_URL", "https://explorer.testnet.whitechain.io"
+    "WHITECHAIN_EXPLORER_URL", "https://testnet.whitechain.io"
 )
 
 # --- Гаманці ---

@@ -34,6 +34,16 @@ directly in testnet WBT and proves it with a transaction hash instead of an
 EIP-3009 signed authorization. Same principle — the seller never trusts the
 client, only the chain — with the crypto-plumbing simplified for an MVP.
 
+## Whitechain Testnet Configuration
+
+| | |
+|---|---|
+| Chain ID | `2625` |
+| RPC | `https://rpc-testnet.whitechain.io` |
+| Explorer | `https://testnet.whitechain.io` |
+| Faucet | `https://testnet.whitechain.io/faucet` |
+| Gas token | WBT |
+
 ## How It Works
 
 ```
@@ -57,6 +67,20 @@ Author Agent  ──GET /photo/{name}──▶  Photobank Server
 Claude (via tool use) decides *when* to call the `buy_photo` tool — the
 payment mechanics are hidden behind that one tool call.
 
+## On-chain proof / Доказ роботи
+
+Real `run_demo.py` run on Whitechain testnet — three autonomous agent-to-agent
+payments, 0.02 WBT each:
+
+- Seller wallet (all incoming payments): [0xfD760023E5671eed77B6f25907d93C077B28441B](https://testnet.whitechain.io/address/0xfD760023E5671eed77B6f25907d93C077B28441B)
+- Transactions:
+  - [0xb7ef1301e13677a92beb9ba37417fe83b82eb48a83ca85633696118e63acea81](https://testnet.whitechain.io/tx/0xb7ef1301e13677a92beb9ba37417fe83b82eb48a83ca85633696118e63acea81)
+  - [0x215ffede864910a14fb162d1457eb9ff0540ff3838bf8e41874b12d8cb099f9e](https://testnet.whitechain.io/tx/0x215ffede864910a14fb162d1457eb9ff0540ff3838bf8e41874b12d8cb099f9e)
+  - [0x05c14d6b76deefda21662681ce1fe651441a2ae95c06ea91708770722b64f7e8](https://testnet.whitechain.io/tx/0x05c14d6b76deefda21662681ce1fe651441a2ae95c06ea91708770722b64f7e8)
+
+![Демо в терміналі](docs/screenshots/terminal.png)
+![Доказ в експлорері](docs/screenshots/explorer.png)
+
 ## Run It Yourself
 
 ```bash
@@ -73,12 +97,14 @@ python -m wallets.setup_wallets      # run again after funding to see balances
 python run_demo.py "Write an article about Kyiv"
 ```
 
-### Try it offline first (no testnet or API key needed)
+### Try it offline first (optional, no testnet or API key needed)
 
-Before spending testnet WBT or Claude API calls, verify the whole pipeline
-end-to-end against a local in-memory EVM chain and a fake Claude client:
+Before spending testnet WBT or Claude API calls, you can verify the whole
+pipeline end-to-end against a local in-memory EVM chain and a fake Claude
+client:
 
 ```bash
+pip install -r requirements-dev.txt   # adds eth-tester[py-evm], dev-only
 python tests/local_integration_test.py
 ```
 
@@ -86,11 +112,19 @@ This exercises wallets → facilitator → photobank server → author agent in
 one process and asserts the money actually moves. If it passes, the only
 thing left is plugging in real Whitechain RPC / API credentials.
 
+This test is optional — `run_demo.py` does not need `requirements-dev.txt`.
+Note for Windows users: `eth-tester[py-evm]` builds a native extension and
+requires [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+to install; if you'd rather skip that, just go straight to `run_demo.py`
+against real Whitechain testnet.
+
 ## Project Structure
 
 ```
 agentpay-whitechain/
 ├── config.py                     # RPC, prices, limits — all from .env
+├── requirements.txt               # runtime dependencies
+├── requirements-dev.txt           # dev-only (offline integration test)
 ├── wallets/setup_wallets.py      # generate wallets, check_balance, send_wbt
 ├── facilitator/whitechain_facilitator.py  # verifies payments on-chain
 ├── photobank/server.py           # FastAPI seller: 402 → verify → deliver
@@ -98,7 +132,10 @@ agentpay-whitechain/
 ├── author/x402_client.py         # pay_and_fetch() + spend-limit ledger
 ├── author/agent.py               # Claude tool-use agent (the buyer)
 ├── run_demo.py                   # orchestration + terminal showcase
-└── tests/local_integration_test.py  # offline end-to-end proof
+├── tests/local_integration_test.py  # offline end-to-end proof
+└── docs/
+    ├── demo-video-script.md      # 2-min recording script
+    └── screenshots/              # terminal.png, explorer.png for this README
 ```
 
 ## Tech Stack

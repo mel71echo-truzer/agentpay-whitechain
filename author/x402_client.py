@@ -17,6 +17,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+from wallets.setup_wallets import explorer_link as _explorer_link  # noqa: E402
 from wallets.setup_wallets import send_wbt  # noqa: E402
 
 
@@ -135,7 +136,6 @@ def pay_and_fetch(
             f"{paid_response.status_code} {paid_response.text}"
         )
 
-    explorer_link = f"{config.WHITECHAIN_EXPLORER_URL}/tx/{tx_hash}"
     log.append("Ресурс отримано після оплати.")
 
     return PurchaseResult(
@@ -143,6 +143,6 @@ def pay_and_fetch(
         content_type=paid_response.headers.get("content-type", ""),
         tx_hash=tx_hash,
         amount_wbt=amount_wbt,
-        explorer_link=explorer_link,
+        explorer_link=_explorer_link(tx_hash),
         log=log,
     )

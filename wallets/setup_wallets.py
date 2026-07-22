@@ -71,7 +71,10 @@ def send_wbt(
     signed_tx = account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    return tx_hash.hex()
+    # web3.py v7 повертає hex без префіксу "0x" — без нього посилання в
+    # explorer ламаються, тож додаємо його тут один раз (без подвоєння).
+    h = tx_hash.hex()
+    return h if h.startswith("0x") else "0x" + h
 
 
 def explorer_link(tx_hash: str) -> str:
