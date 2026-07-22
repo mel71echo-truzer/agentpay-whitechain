@@ -16,6 +16,7 @@ Facilitator дивиться в мережу Whitechain і відповідає 
 """
 
 import json
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -24,6 +25,8 @@ from web3 import Web3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 class WhitechainFacilitator:
@@ -83,9 +86,14 @@ class WhitechainFacilitator:
                 tx = self.w3.eth.get_transaction(tx_hash)
                 receipt = self.w3.eth.get_transaction_receipt(tx_hash)
             except Exception as exc:  # noqa: BLE001 — транзакція може ще не існувати
+                # Деталі винятку (напр. ConnectionError) можуть містити повний
+                # RPC URL — а в ньому часто зашитий секретний API-ключ провайдера
+                # (типовий формат на кшталт /v2/<key>). Ніколи не віддаємо
+                # сирий текст винятку клієнту — тільки в серверний лог.
+                logger.warning("verify_payment: RPC error while looking up %s: %s", tx_hash, exc)
                 return {
                     "valid": False,
-                    "reason": f"Транзакцію не знайдено в мережі: {exc}",
+                    "reason": "Транзакцію не знайдено в мережі (або мережа тимчасово недоступна).",
                     "from": None,
                     "amount_wbt": None,
                 }
