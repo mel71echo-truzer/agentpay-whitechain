@@ -65,54 +65,79 @@ a public deployment but is fixed)*
 ## Medium
 
 ### M-1. A payment is not bound to the specific resource it's redeemed against (race / front-running)
-**File:** `facilitator/whitechain_facilitator.py:54` (`verify_payment` signature) and `photobank/server.py:132-136` · **Status: NOT FIXED — proposal only, needs your decision**
+**Files:** `facilitator/whitechain_facilitator.py` (`verify_payment`), `photobank/server.py` (`get_photo`), `wallets/setup_wallets.py` (`send_wbt`), `author/x402_client.py` (`pay_and_fetch`) · **Status: FIXED**
+
+`verify_payment(tx_hash, expected_to, expected_amount_wbt, ...)` used to
+never receive *which resource* (`name`) the caller was trying to redeem
+the payment for — it only checked "was enough sent to the right address,
+and is this `tx_hash` unused." Whoever was first to present a given valid,
+unused `tx_hash` could choose which same-priced resource it got redeemed
+for, not necessarily the buyer who made the payment (details in the
+original write-up, kept below the fix for context).
+
+**Fix applied — option 2 from the original proposal (the "correct" fix,
+not the cheap first-come-first-served lock), with your sign-off:**
+payment is now bound to its resource **on-chain**, via the transaction's
+`data`/calldata field, which is signed together with the rest of the
+transaction and cannot be altered after the fact:
+
+- `wallets/setup_wallets.py:send_wbt` gained an optional `data: bytes`
+  parameter. When present, gas is computed via `w3.eth.estimate_gas(...)`
+  instead of the fixed `21000` (a plain transfer's base cost — insufficient
+  once calldata is attached; `estimate_gas` is only used on this new path,
+  so the old no-data behavior is byte-for-byte unchanged).
+- `author/x402_client.py:pay_and_fetch` reads the `resource` field already
+  present in the server's 402 payment-requirements JSON (e.g.
+  `/photo/kyiv-lavra`) and passes its UTF-8 bytes as `data` when paying.
+- `photobank/server.py:get_photo` now passes `expected_resource=f"/photo/{name}"`
+  to `verify_payment`.
+- `facilitator/whitechain_facilitator.py:verify_payment` gained an optional
+  `expected_resource: str | None` parameter. When given, it decodes
+  `tx["input"]` as UTF-8 and rejects the payment if it doesn't match
+  exactly — *in addition to*, not instead of, the existing
+  to/amount/replay checks. `expected_resource` defaults to `None` (check
+  skipped) for backward compatibility with any other caller of the
+  facilitator that doesn't need per-resource binding.
+
+Because calldata is part of what's cryptographically signed and mined, a
+third party can no longer redeem someone else's `tx_hash` against a
+resource other than the one it was actually paid for — the calldata simply
+won't match, no matter who submits the redeem request or how fast.
+Confirmed with a new test (`tests/test_security_fixes.py::test_payment_for_photo_a_cannot_unlock_photo_b`):
+paying for `/photo/kyiv-lavra` and then presenting that same `tx_hash`
+against `/photo/kyiv-sofia-cathedral` now gets a clean 402 ("платіж
+призначений для іншого ресурсу"), while presenting it against the correct
+resource still succeeds, and reusing it a second time still hits the
+existing replay protection. The full offline pipeline
+(`tests/local_integration_test.py`) and the standalone facilitator
+self-test both still pass unchanged.
+
+<details>
+<summary>Original write-up (for context)</summary>
 
 `verify_payment(tx_hash, expected_to, expected_amount_wbt, ...)` never
 receives *which resource* (`name`) the caller is trying to redeem the
 payment for. It only checks: "was `expected_amount_wbt` sent to
 `expected_to`, and has this exact `tx_hash` not been used before." Because
-every photo costs the same fixed `PHOTO_PRICE_WBT`, this is not currently
-exploitable for *underpayment* — but it does mean:
+every photo costs the same fixed `PHOTO_PRICE_WBT`, this was not
+exploitable for *underpayment* — but it did mean:
 
 > Whoever is first to present a given valid, unused `tx_hash` to
 > `/photo/{name}` gets to choose which `name` it's redeemed for — not
 > necessarily the buyer who made the payment.
 
 Transaction hashes are not secret (public the moment they're mined). If a
-third party can reach the photobank server and observes the buyer's
-`tx_hash` before the buyer's own follow-up request lands, that third party
-can race to claim a (same-priced) resource of *their* choosing using the
-buyer's money; the legitimate buyer's subsequent request then fails as a
-replay, and they got nothing for the WBT they spent.
+third party could reach the photobank server and observe the buyer's
+`tx_hash` before the buyer's own follow-up request landed, that third
+party could race to claim a (same-priced) resource of *their* choosing
+using the buyer's money; the legitimate buyer's subsequent request would
+then fail as a replay, and they'd get nothing for the WBT they spent.
+Mitigated in practice by the server defaulting to `127.0.0.1`, but a real
+architectural gap regardless.
 
-**Why it's Medium, not Critical, right now:** the server defaults to
-`127.0.0.1` (confirmed, and this is good — see README's new Security Notes
-section), so an external attacker has no network path to race a request in.
-It also only lets an attacker pick which interchangeable stock photo gets
-served, not steal funds or bypass payment. It becomes materially worse
-(High) the moment: (a) the server is reachable by anyone other than the
-buyer's own agent process, or (b) resources are ever priced differently
-(the amount check would still block *underpayment*, since it's checked
-against the price of the resource actually being requested — but a
-same-priced swap would still be possible).
+</details>
 
-**Suggested fix (not applied — changes payment-verification behavior):**
-Bind the payment to the resource by including the resource identifier in
-what's verified. Two options, in increasing correctness/complexity:
-1. **Cheap fix:** track `_used_tx` as `{tx_hash: resource_name}` and have
-   the *first* successful verification for a `tx_hash` lock in which
-   `name` it was redeemed for; this doesn't stop the race but makes the
-   outcome deterministic and auditable (you can tell from the ledger that
-   a mismatch happened).
-2. **Correct fix:** require the resource name to be part of what's
-   cryptographically/on-chain tied to the payment — e.g. have the buyer
-   include the requested photo `name` in the transaction's `data` field
-   (native transfers can carry arbitrary calldata) and have
-   `verify_payment` also take `expected_resource: str` and check
-   `tx["input"]` decodes to it. This is a real protocol change (client and
-   facilitator both need to agree on an encoding) — proposing it, not
-   applying it, per your instruction not to change payment-verification
-   logic without sign-off.
+
 
 ### M-2. `SpendLedger` has no locking — concurrent processes can blow through the spend cap
 **File:** `author/x402_client.py:32-70` · **Status: NOT FIXED — proposal only**
@@ -151,24 +176,50 @@ after broadcast, the ledger still records a best-effort entry (or at least
 logs a loud warning that spend tracking may now be inaccurate).
 
 ### M-3. No `chain_id` sanity check — facilitator trusts whatever chain its RPC happens to be on
-**File:** `facilitator/whitechain_facilitator.py:40-44` (`__init__`) · **Status: NOT FIXED — proposal only**
+**File:** `facilitator/whitechain_facilitator.py:40-67` (`__init__`, `_assert_correct_chain`) · **Status: FIXED**
 
-Nothing in `WhitechainFacilitator` ever asserts
+Nothing in `WhitechainFacilitator` used to assert
 `self.w3.eth.chain_id == config.WHITECHAIN_CHAIN_ID` (2625). A misconfigured
 `WHITECHAIN_RPC_URL` (operator typo pointing at a different chain), or a
-third-party RPC provider silently serving the wrong network, would be
-accepted without complaint — the facilitator would verify "payments" against
-whatever chain it's actually talking to.
+third-party RPC provider silently serving the wrong network, would have
+been accepted without complaint.
 
-Not attacker-controlled in the current architecture (the client never picks
-the RPC — only the server operator's own `.env` does), so this is a
-misconfiguration/supply-chain safety net rather than a client-exploitable
-bug. Still worth having, cheaply.
+**Fix applied — fail fast at construction time, with your sign-off:**
+`WhitechainFacilitator.__init__` now calls a new `_assert_correct_chain()`
+right after `self.w3` is created:
+- If the RPC can't even be reached (connection error/timeout), it raises a
+  `RuntimeError` with a clear, actionable message ("перевір
+  WHITECHAIN_RPC_URL"). The raw exception (which, per C-1, may embed a
+  secret RPC API key in the URL) is logged server-side only via
+  `logger.error`, never included in the raised message — consistent with
+  the C-1 fix.
+- If the RPC answers but reports a different `chain_id` than
+  `config.WHITECHAIN_CHAIN_ID`, it raises a `RuntimeError` stating both the
+  expected and actual chain IDs.
 
-**Suggested fix (not applied, since it changes what `verify_payment` accepts/rejects):**
-assert the chain ID once in `__init__` (fail fast and loud on startup) and/or
-on every `verify_payment` call for defense-in-depth against an RPC that
-switches chains mid-session.
+**A knock-on change was needed to keep this safe:** `photobank/server.py`
+used to construct `facilitator = WhitechainFacilitator()` eagerly at
+*module import time* — which would now mean a bare `import photobank.server`
+(as done by any test, or any tool that just wants `app`) crashes immediately
+if `WHITECHAIN_RPC_URL` isn't configured/reachable yet, before
+`run_demo.py`'s own friendly `_check_config()` pre-flight check even runs.
+Fixed by making the module-level `facilitator` start as `None` and
+constructing it explicitly right before the server actually starts serving:
+in `photobank/server.py`'s own `if __name__ == "__main__"` block for
+standalone runs, and in `run_demo.py:start_photobank_server()` for the
+demo (after `_check_config()` has already confirmed `WHITECHAIN_RPC_URL`
+is set). `get_photo` also now returns a clean 503 instead of crashing if
+somehow called before the facilitator is initialized. Test harnesses
+(`tests/local_integration_test.py`, `tests/test_security_fixes.py`)
+already construct their own facilitator explicitly and were unaffected
+apart from one that needed the same treatment already in place.
+
+Confirmed with a new test
+(`tests/test_security_fixes.py::test_chain_id_mismatch_fails_fast`): a
+facilitator pointed at a local test chain with a deliberately wrong
+`config.WHITECHAIN_CHAIN_ID` refuses to construct; the same setup with the
+correct chain ID works. Also manually confirmed the RPC-unreachable path
+raises a clean `RuntimeError` without leaking the RPC URL.
 
 ### M-4. Replay protection breaks under multiple worker processes
 **File:** `facilitator/whitechain_facilitator.py:33-52` · **Status: NOT FIXED — documented limitation**
@@ -347,13 +398,21 @@ outcomes for any valid input):**
   photobank server publicly without auth/HTTPS, don't screen-record wallet
   generation, testnet funds only, and a pointer to this file.
 
-**Left for your decision (all documented above with a concrete proposed
-patch) because they change payment-verification or spend-limit behavior:**
-- M-1 — payments aren't bound to a specific resource (race/front-running
-  risk, low impact today given `127.0.0.1` binding + uniform pricing).
+**Fixed in a follow-up pass, with your explicit sign-off (these do change
+payment-verification behavior, which is why they'd been held back initially):**
+- M-1 — payments are now bound to the specific resource they were paid for,
+  via signed on-chain calldata (the "correct" option 2 from the original
+  proposal, not the cheap first-come-first-served lock). See the M-1
+  section above for the full before/after.
+- M-3 — the facilitator now asserts `chain_id` matches Whitechain testnet
+  (2625) at construction time and fails fast with a clear error otherwise,
+  instead of silently trusting whatever chain its RPC happens to answer
+  for. See the M-3 section above.
+
+**Still left for your decision (documented above with a concrete proposed
+patch) because they change spend-limit or replay-protection behavior:**
 - M-2 — `SpendLedger` has no locking (real, reproduced race; not reachable
   via the current sequential agent loop).
-- M-3 — no `chain_id` assertion in the facilitator.
 - M-4 — replay protection is single-process-only; document or add a real
   shared store before ever running with multiple workers.
 - L-3 — float-for-money hardening (no active bug found, but recommend
@@ -367,17 +426,17 @@ patch) because they change payment-verification or spend-limit behavior:**
 
 **Current state — local machine, testnet-only, single operator, server bound
 to `127.0.0.1`, you are the only person who can reach it:** **Low.** The one
-Critical finding (RPC-secret leak) is fixed. Everything else left open
-requires either a second concurrent process/attacker with network access to
-the server, or scaling decisions (multiple workers, real pricing tiers,
-mainnet funds) that haven't been made yet. Safe to keep developing and
-demoing as-is.
+Critical finding (RPC-secret leak) and both Medium findings that were
+reachable in principle by a party who could reach the server (M-1) or a
+misconfigured RPC (M-3) are fixed. Everything still open (M-2, M-4)
+requires either a second concurrent process, or scaling decisions (multiple
+workers, real pricing tiers, mainnet funds) that haven't been made yet.
+Safe to keep developing and demoing as-is.
 
 **If you deploy the photobank server publicly reachable, or move to
 mainnet with real value:** treat this as **not ready.** At minimum, before
-that step: resolve M-1 (resource binding), M-2 (ledger locking) if you ever
-parallelize purchases, M-4 (replay protection needs a real shared store,
-not a single process's in-memory set + plain file), add authentication in
-front of the server, and get a second set of eyes / a professional audit —
-this review is thorough but is not a substitute for one, especially before
-holding real funds.
+that step: resolve M-2 (ledger locking) if you ever parallelize purchases,
+M-4 (replay protection needs a real shared store, not a single process's
+in-memory set + plain file), add authentication in front of the server, and
+get a second set of eyes / a professional audit — this review is thorough
+but is not a substitute for one, especially before holding real funds.

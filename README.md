@@ -59,10 +59,16 @@ Author Agent  ──GET /photo/{name}──▶  Photobank Server
      │                                                    │
      │                                     facilitator.verify_payment(txHash)
      │                                     checks: on-chain, right address,
-     │                                     right amount, not replayed
+     │                                     right amount, right resource
+     │                                     (calldata), not replayed
      │                                                    ▼
      ◀──────────────────── photo + X-PAYMENT-RESPONSE ────┘
 ```
+
+The resource name (`/photo/{name}`) travels in the transaction's own
+calldata, signed together with the payment itself — so a given transaction
+can only ever be redeemed for the exact photo it paid for, not swapped for
+a different one.
 
 Claude (via tool use) decides *when* to call the `buy_photo` tool — the
 payment mechanics are hidden behind that one tool call.
@@ -153,9 +159,13 @@ deploying it anywhere beyond your own machine, read this:
 - **The photobank server binds to `127.0.0.1` by default (good) — keep it that
   way.** Do not expose it to the public internet or `0.0.0.0` without adding
   authentication and HTTPS in front of it. `verify_payment` currently trusts
-  any caller who can reach the server and present a valid-looking payment
-  proof; there is no per-caller auth, rate limiting, or resource-level binding
-  of a payment to the specific item it was meant to pay for.
+  any caller who can reach the server and present a valid payment proof;
+  there is no per-caller auth or rate limiting (each payment *is* bound
+  on-chain to the specific resource it was made for — see below — but
+  nothing stops an unauthenticated caller from reaching the server at all).
+- **The facilitator checks it's actually talking to Whitechain testnet**
+  (chain ID `2625`) on startup and refuses to run against a misconfigured
+  or unreachable RPC — see `facilitator/whitechain_facilitator.py`.
 - **`wallets/setup_wallets.py` prints private keys to your terminal** so you
   can copy them into `.env`. Don't run it during a screen recording (see
   `docs/demo-video-script.md`), and clear your terminal scrollback/history
