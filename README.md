@@ -145,6 +145,26 @@ agentpay-whitechain/
 - **Chain:** Whitechain testnet (Chain ID 2625), gas in WBT
 - **Server:** FastAPI
 
+## Security Notes
+
+This is a testnet prototype, not production-hardened financial software. Before
+deploying it anywhere beyond your own machine, read this:
+
+- **The photobank server binds to `127.0.0.1` by default (good) — keep it that
+  way.** Do not expose it to the public internet or `0.0.0.0` without adding
+  authentication and HTTPS in front of it. `verify_payment` currently trusts
+  any caller who can reach the server and present a valid-looking payment
+  proof; there is no per-caller auth, rate limiting, or resource-level binding
+  of a payment to the specific item it was meant to pay for.
+- **`wallets/setup_wallets.py` prints private keys to your terminal** so you
+  can copy them into `.env`. Don't run it during a screen recording (see
+  `docs/demo-video-script.md`), and clear your terminal scrollback/history
+  afterwards.
+- **Only fund these wallets with testnet WBT.** This codebase has not had a
+  professional security audit and should not hold mainnet funds.
+- A full internal security review is in [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) —
+  read it before any public deployment or mainnet work.
+
 ## Status
 
 Prototype / proof-of-concept. Looking to take this to production.
