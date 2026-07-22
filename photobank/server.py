@@ -41,7 +41,15 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # (JSON з одним полем txHash), тож обмежуємо розмір з запасом.
 _MAX_PAYMENT_HEADER_LEN = 4096
 
-facilitator = WhitechainFacilitator()
+# Facilitator НЕ створюється тут, при простому імпорті модуля: його
+# конструктор тепер одразу перевіряє RPC і chain_id (fail fast, див.
+# facilitator/whitechain_facilitator.py), а для цього потрібен справді
+# робочий RPC. Якщо створювати його на рівні модуля, будь-який `import
+# photobank.server` (наприклад тестами) впав би без RPC. Реальний запуск
+# сервера ініціалізує його явно — див. `if __name__ == "__main__"` нижче
+# і run_demo.py:start_photobank_server(). Тести підміняють цю змінну
+# власним facilitator (напр. на локальному EthereumTesterProvider).
+facilitator: WhitechainFacilitator | None = None
 
 # Стан Фотобанку тримаємо в пам'яті процесу — для MVP-демо цього достатньо
 # (run_demo.py піднімає сервер і одразу з ним працює в межах одного запуску).
@@ -129,10 +137,17 @@ def get_photo(name: str, request: Request, x_payment: str | None = Header(defaul
             content={"error": "Заголовок X-PAYMENT некоректний. Очікується base64 JSON з полем txHash."},
         )
 
+    if facilitator is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Сервер ще не готовий (facilitator не ініціалізований)."},
+        )
+
     result = facilitator.verify_payment(
         tx_hash=payment["txHash"],
         expected_to=config.PHOTOBANK_WALLET_ADDRESS,
         expected_amount_wbt=config.PHOTO_PRICE_WBT,
+        expected_resource=f"/photo/{name}",
     )
 
     if not result["valid"]:
@@ -165,4 +180,5 @@ def get_photo(name: str, request: Request, x_payment: str | None = Header(defaul
 if __name__ == "__main__":
     import uvicorn
 
+    facilitator = WhitechainFacilitator()  # fail fast тут, якщо RPC/chain не той
     uvicorn.run(app, host=config.PHOTOBANK_HOST, port=config.PHOTOBANK_PORT)

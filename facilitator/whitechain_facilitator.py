@@ -39,9 +39,37 @@ class WhitechainFacilitator:
 
     def __init__(self, w3: Web3 | None = None, used_tx_store: str = ".facilitator_used_tx.json"):
         self.w3 = w3 or Web3(Web3.HTTPProvider(config.WHITECHAIN_RPC_URL))
+        self._assert_correct_chain()
         self._store_path = Path(used_tx_store)
         self._lock = threading.Lock()
         self._used_tx = self._load_used_tx()
+
+    def _assert_correct_chain(self) -> None:
+        """Fail fast на старті, якщо RPC веде не на той ланцюжок (chain 2625).
+
+        Захист від неправильно налаштованого WHITECHAIN_RPC_URL (тайпо,
+        або провайдер, що мовчки віддає дані іншого ланцюжка) — без цього
+        facilitator міг би "підтверджувати" платежі, перевірені зовсім не
+        на Whitechain.
+        """
+        try:
+            actual_chain_id = self.w3.eth.chain_id
+        except Exception as exc:  # noqa: BLE001 — RPC недоступний на старті
+            # Сирий текст винятку в лог, не в повідомлення — URL може містити
+            # секретний ключ провайдера (див. WHITECHAIN_RPC_URL у .env).
+            logger.error("Не вдалося підключитися до Whitechain RPC на старті: %s", exc)
+            raise RuntimeError(
+                "Не вдалося підключитися до Whitechain RPC, щоб перевірити мережу. "
+                "Перевір WHITECHAIN_RPC_URL у .env — RPC має бути доступний і відповідати."
+            ) from None
+
+        if actual_chain_id != config.WHITECHAIN_CHAIN_ID:
+            raise RuntimeError(
+                f"RPC веде на chain_id={actual_chain_id}, а очікується Whitechain "
+                f"testnet chain_id={config.WHITECHAIN_CHAIN_ID}. Перевір WHITECHAIN_RPC_URL "
+                "і WHITECHAIN_CHAIN_ID у .env — facilitator відмовляється підтверджувати "
+                "платежі на невідомій мережі."
+            )
 
     def _load_used_tx(self) -> set[str]:
         if self._store_path.exists():
@@ -57,6 +85,7 @@ class WhitechainFacilitator:
         expected_to: str,
         expected_amount_wbt: float,
         min_confirmations: int = 1,
+        expected_resource: str | None = None,
     ) -> dict:
         """Перевіряє, що транзакція tx_hash — це справжня оплата.
 
@@ -68,8 +97,15 @@ class WhitechainFacilitator:
         2. Статус транзакції == 1 (успішна, не revert)
         3. Отримувач (to) == expected_to
         4. Сума (value) >= очікуваної суми (у wei)
-        5. Транзакція має достатньо підтверджень (min_confirmations)
-        6. Цей tx_hash ще не використовувався раніше (захист від повтору)
+        5. Якщо задано expected_resource — calldata транзакції декодується
+           саме в цей рядок (прив'язка платежу до конкретного ресурсу, а не
+           просто "хтось заплатив достатньо комусь колись")
+        6. Транзакція має достатньо підтверджень (min_confirmations)
+        7. Цей tx_hash ще не використовувався раніше (захист від повтору)
+
+        expected_resource — необов'язковий; якщо не задано, перевірка
+        прив'язки до ресурсу пропускається (сумісність зі старими викликами
+        та з generic-використанням facilitator поза Фотобанком).
         """
         tx_hash = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
 
@@ -124,6 +160,28 @@ class WhitechainFacilitator:
                     "from": tx["from"],
                     "amount_wbt": amount_wbt,
                 }
+
+            if expected_resource is not None:
+                # calldata (tx["input"]) підписана разом з рештою транзакції —
+                # її не можна підмінити заднім числом. Якщо вона не збігається
+                # з ресурсом, який зараз намагаються отримати, цей платіж був
+                # призначений для чогось іншого — відхиляємо, навіть якщо сума
+                # й адреса правильні (інакше валідний tx_hash для фото A можна
+                # було б пред'явити за фото B, поки законний покупець не встиг).
+                try:
+                    actual_resource = bytes(tx["input"]).decode("utf-8")
+                except UnicodeDecodeError:
+                    actual_resource = None
+                if actual_resource != expected_resource:
+                    return {
+                        "valid": False,
+                        "reason": (
+                            "Платіж призначений для іншого ресурсу "
+                            f"({actual_resource!r}, а очікується {expected_resource!r})."
+                        ),
+                        "from": tx["from"],
+                        "amount_wbt": amount_wbt,
+                    }
 
             latest_block = self.w3.eth.block_number
             confirmations = latest_block - receipt.blockNumber + 1
