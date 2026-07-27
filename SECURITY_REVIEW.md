@@ -1,4 +1,20 @@
-# Security Review — AgentPay on Whitechain
+# Security Review — AgentPay on Whitechain (Phase 0)
+
+> **Scope note (Phase 1):** this review covers the Phase 0 architecture —
+> native-WBT transfers, txHash-based payment proofs, no KYA gate. Phase 1
+> replaced that payment core with tEURC/EIP-3009 + a WB Soul KYA/reputation
+> gate (`facilitator/whitechain_facilitator.py`, `agent_client.py`,
+> `service_provider/server.py`, `contracts/`) — see `README.md` and
+> `DEPLOY_WHITECHAIN.md`. The files this review references
+> (`photobank/server.py`, `author/x402_client.py`, `run_demo.py`) no longer
+> exist under those names/shapes; kept here as the historical record of
+> what was found and fixed in Phase 0, several of which (input validation,
+> path-traversal whitelist, no-secrets-in-errors) carried forward directly
+> into the Phase 1 rewrite. Phase 1's new attack surface (EIP-3009 relay,
+> KYA/reputation gate, fee-forwarding custody) has **not** had an equivalent
+> dedicated audit yet — treat that as an open item before any real
+> deployment, same as this document's own closing risk assessment already
+> says about Phase 0.
 
 Internal audit of the payment-verification core, the FastAPI seller, the
 spend-limit ledger, dependencies, and general code quality. Scope: this
