@@ -21,9 +21,10 @@ const CHAIN_ID = process.env.CHAIN_ID ? Number(process.env.CHAIN_ID) : 2625;
 // (детальний порядок дій — DEPLOY_WHITECHAIN.md).
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.20",
+    version: "0.8.24",
     settings: {
       optimizer: { enabled: true, runs: 200 },
+      evmVersion: "cancun",
     },
   },
   paths: {
