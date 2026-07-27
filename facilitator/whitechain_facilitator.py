@@ -1,250 +1,276 @@
-"""x402-facilitator для Whitechain — Частина 3 з ТЗ (серце проєкту).
+"""x402-facilitator для Whitechain — Фаза 1: KYA-гейт + reputation + EIP-3009.
 
-Що таке facilitator: це "касир". Сервіс (Фотобанк) сам не хоче лізти в
-блокчейн і перевіряти транзакції — натомість він питає facilitator:
-"ось хеш транзакції, чи справді на неї заплатили $0.02 на мою адресу?".
-Facilitator дивиться в мережу Whitechain і відповідає true/false.
+Що змінилось порівняно з Фазою 0 (нативний WBT + txHash):
+- Оплата тепер у tEURC (ERC-20, EIP-3009) замість нативного WBT. Клієнт
+  підписує authorization ОФЧЕЙН (EIP-712) — facilitator валідує підпис
+  локально, без жодного виклику мережі, і тільки ПІСЛЯ повної офчейн-
+  валідації релеїть transferWithAuthorization у мережу.
+- Перед будь-якою перевіркою суми/підпису йде KYA-гейт: платник має мати
+  верифікований WB Soul. Без цього — відмова, незалежно від суми чи підпису.
+- Читається reputation агента (кількість SBT, прив'язаних до soul) —
+  сервіс може вимагати мінімальний tier для преміум-ресурсів.
+- Facilitator бере комісію (config.FACILITATOR_FEE_BPS, за замовчуванням
+  0.5%) і форвардить решту AI Service Provider-у окремим переказом (простіший
+  робочий варіант із двох, описаних у README/DEPLOY — без окремого
+  router-контракту, ціною двох послідовних транзакцій замість однієї
+  атомарної).
+- Контент видається одразу після успішної офчейн-валідації + релею в
+  мережу (широкосяг, без wait_for_transaction_receipt) — не чекаємо
+  підтвердження блоку в циклі запиту. Це свідомий trade-off, задокументований
+  у README: якщо релей пізніше провалиться (напр. нестача gas у
+  facilitator-а), контент уже буде видано без фактичної оплати. Прийнятно
+  для PoC; для продакшену треба або чекати підтвердження, або мати
+  страхувальний механізм (ретраї/моніторинг провалених релеїв).
 
-Оригінальний x402-facilitator від Coinbase зроблений під Base і схему
-"exact" (EIP-3009 transferWithAuthorization для USDC — платіж підписується
-офчейн і сетлиться сервером). У Whitechain testnet немає готового USDC,
-тому тут спрощена схема "exact-native" (див. config.X402_SCHEME): клієнт
-просто відправляє нативний WBT-переказ сам (wallets/setup_wallets.send_wbt)
-і як доказ платежу передає tx hash. Facilitator перевіряє цю транзакцію
-напряму в мережі — той самий принцип (сервіс не довіряє клієнту на слово,
-довіряє блокчейну), спрощений виклик до RPC.
+KYA/reputation читаються через ОДИН і той самий інтерфейс незалежно від
+того, чи це MockSoulRegistry (config.USE_MOCK_SOUL=true) чи справжні WB
+Soul контракти на Whitechain (USE_MOCK_SOUL=false) — інтерфейси
+ISoulRegistry/ISoulAttributeRegistry/ISoulBoundTokenRegistry скопійовані
+1:1 з https://github.com/whitebit-exchange/soul-ecosystem-contracts.
 """
 
-import json
 import logging
 import sys
-import threading
+import time as _time
 from pathlib import Path
 
+from eth_account import Account
+from eth_account.messages import encode_typed_data
 from web3 import Web3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import chain  # noqa: E402
 import config  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# EIP-712 типи для tEURC.TransferWithAuthorization — мають збігатися з
+# TRANSFER_WITH_AUTHORIZATION_TYPEHASH у contracts/tEURC.sol.
+TRANSFER_AUTH_TYPES = {
+    "TransferWithAuthorization": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "value", "type": "uint256"},
+        {"name": "validAfter", "type": "uint256"},
+        {"name": "validBefore", "type": "uint256"},
+        {"name": "nonce", "type": "bytes32"},
+    ]
+}
+
+
+def _to_bytes32(value) -> bytes:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return bytes.fromhex(value.removeprefix("0x"))
+
 
 class WhitechainFacilitator:
-    """Перевіряє платежі в WBT на мережі Whitechain.
-
-    used_tx_store — шлях до JSON-файлу, де facilitator запам'ятовує, які tx
-    вже були зараховані як оплата. Це захист від повторного використання
-    одного й того ж доказу платежу для отримання кількох товарів.
-    """
-
-    def __init__(self, w3: Web3 | None = None, used_tx_store: str = ".facilitator_used_tx.json"):
-        self.w3 = w3 or Web3(Web3.HTTPProvider(config.WHITECHAIN_RPC_URL))
+    def __init__(self, w3: Web3 | None = None):
+        self.w3 = w3 or chain.get_w3()
         self._assert_correct_chain()
-        self._store_path = Path(used_tx_store)
-        self._lock = threading.Lock()
-        self._used_tx = self._load_used_tx()
+
+        self.teurc = chain.get_contract(self.w3, "tEURC", config.TEURC_ADDRESS)
+        self.soul_registry = chain.get_contract(self.w3, "ISoulRegistry", config.SOUL_REGISTRY_ADDRESS)
+        self.attribute_registry = chain.get_contract(
+            self.w3, "ISoulAttributeRegistry", config.SOUL_ATTRIBUTE_REGISTRY_ADDRESS
+        )
+        self.sbt_registry = chain.get_contract(
+            self.w3, "ISoulBoundTokenRegistry", config.SOUL_BOUND_TOKEN_REGISTRY_ADDRESS
+        )
+        self.is_verified_attribute = Web3.to_checksum_address(config.IS_VERIFIED_ATTRIBUTE_ADDRESS)
 
     def _assert_correct_chain(self) -> None:
-        """Fail fast на старті, якщо RPC веде не на той ланцюжок (chain 2625).
-
-        Захист від неправильно налаштованого WHITECHAIN_RPC_URL (тайпо,
-        або провайдер, що мовчки віддає дані іншого ланцюжка) — без цього
-        facilitator міг би "підтверджувати" платежі, перевірені зовсім не
-        на Whitechain.
-        """
+        """Fail fast на старті, якщо RPC веде не на той ланцюжок."""
         try:
             actual_chain_id = self.w3.eth.chain_id
         except Exception as exc:  # noqa: BLE001 — RPC недоступний на старті
-            # Сирий текст винятку в лог, не в повідомлення — URL може містити
-            # секретний ключ провайдера (див. WHITECHAIN_RPC_URL у .env).
-            logger.error("Не вдалося підключитися до Whitechain RPC на старті: %s", exc)
+            logger.error("Не вдалося підключитися до RPC на старті: %s", exc)
             raise RuntimeError(
-                "Не вдалося підключитися до Whitechain RPC, щоб перевірити мережу. "
-                "Перевір WHITECHAIN_RPC_URL у .env — RPC має бути доступний і відповідати."
+                "Не вдалося підключитися до RPC, щоб перевірити мережу. Перевір "
+                "WHITECHAIN_TESTNET_RPC/NETWORK у .env — RPC має бути доступний і відповідати."
             ) from None
 
-        if actual_chain_id != config.WHITECHAIN_CHAIN_ID:
+        if config.NETWORK == "whitechain_testnet" and actual_chain_id != config.CHAIN_ID:
             raise RuntimeError(
                 f"RPC веде на chain_id={actual_chain_id}, а очікується Whitechain "
-                f"testnet chain_id={config.WHITECHAIN_CHAIN_ID}. Перевір WHITECHAIN_RPC_URL "
-                "і WHITECHAIN_CHAIN_ID у .env — facilitator відмовляється підтверджувати "
-                "платежі на невідомій мережі."
+                f"testnet chain_id={config.CHAIN_ID}. Перевір WHITECHAIN_TESTNET_RPC/CHAIN_ID у .env."
             )
 
-    def _load_used_tx(self) -> set[str]:
-        if self._store_path.exists():
-            return set(json.loads(self._store_path.read_text()))
-        return set()
+    def _eip712_domain(self) -> dict:
+        return {
+            "name": "Test EURC",
+            "version": "1",
+            "chainId": self.w3.eth.chain_id,
+            "verifyingContract": self.teurc.address,
+        }
 
-    def _save_used_tx(self) -> None:
-        self._store_path.write_text(json.dumps(sorted(self._used_tx)))
+    def check_kya(self, address: str) -> dict:
+        """KYA-гейт + reputation-читання для `address`.
 
-    def verify_payment(
-        self,
-        tx_hash: str,
-        expected_to: str,
-        expected_amount_wbt: float,
-        min_confirmations: int = 1,
-        expected_resource: str | None = None,
-    ) -> dict:
-        """Перевіряє, що транзакція tx_hash — це справжня оплата.
-
-        Повертає dict:
-          {"valid": bool, "reason": str, "from": str | None, "amount_wbt": float | None}
-
-        Умови, які мають виконатись, щоб valid=True:
-        1. Транзакція існує і має receipt (уже потрапила в блок)
-        2. Статус транзакції == 1 (успішна, не revert)
-        3. Отримувач (to) == expected_to
-        4. Сума (value) >= очікуваної суми (у wei)
-        5. Якщо задано expected_resource — calldata транзакції декодується
-           саме в цей рядок (прив'язка платежу до конкретного ресурсу, а не
-           просто "хтось заплатив достатньо комусь колись")
-        6. Транзакція має достатньо підтверджень (min_confirmations)
-        7. Цей tx_hash ще не використовувався раніше (захист від повтору)
-
-        expected_resource — необов'язковий; якщо не задано, перевірка
-        прив'язки до ресурсу пропускається (сумісність зі старими викликами
-        та з generic-використанням facilitator поза Фотобанком).
+        Повертає {"ok": True, "soul_id":..., "reputation_tier":...}
+        або {"ok": False, "reason": "..."}.
         """
-        tx_hash = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
+        address = Web3.to_checksum_address(address)
+        soul_id = self.soul_registry.functions.soulOf(address).call()
+        if soul_id == 0:
+            return {"ok": False, "reason": "Агент не має верифікованого WB Soul (not KYA-verified)."}
 
-        with self._lock:
-            if tx_hash in self._used_tx:
-                return {
-                    "valid": False,
-                    "reason": "Ця транзакція вже була зарахована раніше (replay).",
-                    "from": None,
-                    "amount_wbt": None,
-                }
+        raw_value = self.attribute_registry.functions.soulAttributeValue(
+            soul_id, self.is_verified_attribute
+        ).call()
+        verified = bytes(raw_value) != b"\x00" * 20
+        if not verified:
+            return {"ok": False, "reason": "KYC агента не активний (KYA not active)."}
 
-            try:
-                tx = self.w3.eth.get_transaction(tx_hash)
-                receipt = self.w3.eth.get_transaction_receipt(tx_hash)
-            except Exception as exc:  # noqa: BLE001 — транзакція може ще не існувати
-                # Деталі винятку (напр. ConnectionError) можуть містити повний
-                # RPC URL — а в ньому часто зашитий секретний API-ключ провайдера
-                # (типовий формат на кшталт /v2/<key>). Ніколи не віддаємо
-                # сирий текст винятку клієнту — тільки в серверний лог.
-                logger.warning("verify_payment: RPC error while looking up %s: %s", tx_hash, exc)
-                return {
-                    "valid": False,
-                    "reason": "Транзакцію не знайдено в мережі (або мережа тимчасово недоступна).",
-                    "from": None,
-                    "amount_wbt": None,
-                }
+        sbt_count = self.sbt_registry.functions.tokensCountBySoul(soul_id).call()
+        reputation_tier = 0 if sbt_count == 0 else (1 if sbt_count == 1 else 2)
 
-            if receipt.status != 1:
-                return {
-                    "valid": False,
-                    "reason": "Транзакція є в мережі, але провалилась (status != 1).",
-                    "from": tx["from"],
-                    "amount_wbt": None,
-                }
+        return {"ok": True, "soul_id": soul_id, "reputation_tier": reputation_tier}
 
-            actual_to = Web3.to_checksum_address(tx["to"]) if tx["to"] else None
-            expected_to_checksum = Web3.to_checksum_address(expected_to)
-            if actual_to != expected_to_checksum:
-                return {
-                    "valid": False,
-                    "reason": f"Оплата пішла не на ту адресу: {actual_to} замість {expected_to_checksum}.",
-                    "from": tx["from"],
-                    "amount_wbt": float(Web3.from_wei(tx["value"], "ether")),
-                }
+    def verify_and_settle(
+        self,
+        authorization: dict,
+        resource: str,
+        resource_salt: str,
+        price_teurc: float,
+        min_reputation_tier: int = 0,
+    ) -> dict:
+        """Перевіряє KYA + reputation + офчейн-підпис + прив'язку до ресурсу,
+        і якщо все гаразд — релеїть оплату в мережу та форвардить комісію.
 
-            amount_wbt = float(Web3.from_wei(tx["value"], "ether"))
-            if amount_wbt < expected_amount_wbt:
-                return {
-                    "valid": False,
-                    "reason": f"Сума замала: {amount_wbt} WBT < {expected_amount_wbt} WBT.",
-                    "from": tx["from"],
-                    "amount_wbt": amount_wbt,
-                }
+        authorization: {"from","to","value","validAfter","validBefore","nonce","v","r","s"}
+        resource_salt: hex-рядок (32 байти) — разом з `resource` дає nonce
+            (keccak256(resource || salt)), який має збігатися з
+            authorization["nonce"]. Це прив'язує саме цю авторизацію до
+            саме цього ресурсу (той самий принцип, що calldata-прив'язка
+            у Фазі 0, адаптований під EIP-3009, де немає вільного data-поля).
 
-            if expected_resource is not None:
-                # calldata (tx["input"]) підписана разом з рештою транзакції —
-                # її не можна підмінити заднім числом. Якщо вона не збігається
-                # з ресурсом, який зараз намагаються отримати, цей платіж був
-                # призначений для чогось іншого — відхиляємо, навіть якщо сума
-                # й адреса правильні (інакше валідний tx_hash для фото A можна
-                # було б пред'явити за фото B, поки законний покупець не встиг).
-                try:
-                    actual_resource = bytes(tx["input"]).decode("utf-8")
-                except UnicodeDecodeError:
-                    actual_resource = None
-                if actual_resource != expected_resource:
-                    return {
-                        "valid": False,
-                        "reason": (
-                            "Платіж призначений для іншого ресурсу "
-                            f"({actual_resource!r}, а очікується {expected_resource!r})."
-                        ),
-                        "from": tx["from"],
-                        "amount_wbt": amount_wbt,
-                    }
+        Повертає dict з "valid" (bool), "reason", і — де застосовно —
+        "reputation_tier", "soul_id", txhashes і суми.
+        """
+        from_addr = Web3.to_checksum_address(authorization["from"])
 
-            latest_block = self.w3.eth.block_number
-            confirmations = latest_block - receipt.blockNumber + 1
-            if confirmations < min_confirmations:
-                return {
-                    "valid": False,
-                    "reason": f"Замало підтверджень: {confirmations} < {min_confirmations}.",
-                    "from": tx["from"],
-                    "amount_wbt": amount_wbt,
-                }
+        # 1. KYA-гейт — перед будь-чим іншим.
+        kya = self.check_kya(from_addr)
+        if not kya["ok"]:
+            return {"valid": False, "reason": kya["reason"]}
+        reputation_tier = kya["reputation_tier"]
 
-            self._used_tx.add(tx_hash)
-            self._save_used_tx()
-
+        # 2. Reputation-гейт (якщо ресурс його вимагає).
+        if reputation_tier < min_reputation_tier:
             return {
-                "valid": True,
-                "reason": "Оплату підтверджено.",
-                "from": tx["from"],
-                "amount_wbt": amount_wbt,
+                "valid": False,
+                "reason": (
+                    f"Недостатня репутація: tier {reputation_tier} < потрібно "
+                    f"{min_reputation_tier} (insufficient reputation)."
+                ),
+                "reputation_tier": reputation_tier,
             }
 
+        # 3. Прив'язка до ресурсу: nonce має дорівнювати keccak256(resource || salt).
+        try:
+            salt_bytes = _to_bytes32(resource_salt)
+            given_nonce = _to_bytes32(authorization["nonce"])
+        except ValueError:
+            return {"valid": False, "reason": "Некоректний формат nonce/salt.", "reputation_tier": reputation_tier}
 
-if __name__ == "__main__":
-    # Тест: емулюємо реальну транзакцію з Тижня 1 (Частина 1) на локальному
-    # тестовому ланцюжку, щоб перевірити логіку facilitator без реального RPC.
-    from web3 import EthereumTesterProvider
+        expected_nonce = Web3.keccak(resource.encode("utf-8") + salt_bytes)
+        if expected_nonce != given_nonce:
+            return {
+                "valid": False,
+                "reason": "Авторизація призначена для іншого ресурсу (resource binding mismatch).",
+                "reputation_tier": reputation_tier,
+            }
 
-    import wallets.setup_wallets as sw
+        # 4. Офчейн-валідація підпису — жодного виклику мережі.
+        message = {
+            "from": from_addr,
+            "to": Web3.to_checksum_address(authorization["to"]),
+            "value": int(authorization["value"]),
+            "validAfter": int(authorization["validAfter"]),
+            "validBefore": int(authorization["validBefore"]),
+            "nonce": given_nonce,
+        }
+        signable = encode_typed_data(self._eip712_domain(), TRANSFER_AUTH_TYPES, message)
+        try:
+            recovered = Account.recover_message(
+                signable, vrs=(authorization["v"], authorization["r"], authorization["s"])
+            )
+        except Exception as exc:  # noqa: BLE001 — навмисно широкий: будь-яка погана вхідна структура
+            logger.warning("Не вдалося відновити підписанта: %s", exc)
+            return {"valid": False, "reason": "Некоректний підпис.", "reputation_tier": reputation_tier}
 
-    test_w3 = Web3(EthereumTesterProvider())
-    faucet = test_w3.eth.accounts[0]
+        if recovered.lower() != from_addr.lower():
+            return {"valid": False, "reason": "Підпис не відповідає полю 'from'.", "reputation_tier": reputation_tier}
 
-    author_addr, author_key = sw.generate_wallet()
-    photobank_addr, _ = sw.generate_wallet()
-    test_w3.eth.send_transaction(
-        {"from": faucet, "to": author_addr, "value": Web3.to_wei(1, "ether")}
-    )
+        # 5. Часове вікно — та сама умова, що й у контракті (тут — щоб
+        # відмовити швидко, без витрат на завідомо марний релей).
+        now = int(_time.time())
+        if now <= message["validAfter"]:
+            return {"valid": False, "reason": "Авторизація ще не дійсна.", "reputation_tier": reputation_tier}
+        if now >= message["validBefore"]:
+            return {"valid": False, "reason": "Авторизація протермінована.", "reputation_tier": reputation_tier}
 
-    config.WHITECHAIN_CHAIN_ID = test_w3.eth.chain_id
-    tx_hash = sw.send_wbt(author_key, photobank_addr, 0.02, test_w3)
+        # 6. Anti-replay: nonce не використаний ОНЧЕЙН (джерело істини — сам контракт).
+        if self.teurc.functions.authorizationState(from_addr, given_nonce).call():
+            return {"valid": False, "reason": "Ця авторизація вже використана (replay).", "reputation_tier": reputation_tier}
 
-    facilitator = WhitechainFacilitator(w3=test_w3, used_tx_store=".test_used_tx.json")
+        # 7. Сума і отримувач.
+        if message["to"].lower() != config.FACILITATOR_WALLET_ADDRESS.lower():
+            return {
+                "valid": False,
+                "reason": "Авторизація призначена не на адресу facilitator-а.",
+                "reputation_tier": reputation_tier,
+            }
+        price_wei = round(price_teurc * (10**config.TEURC_DECIMALS))
+        if message["value"] < price_wei:
+            return {
+                "valid": False,
+                "reason": f"Сума замала: {message['value']} < {price_wei} (потрібна ціна ресурсу).",
+                "reputation_tier": reputation_tier,
+            }
 
-    print("=== Тест facilitator ===\n")
+        # Усі перевірки пройдено офчейн — релеїмо в мережу. Не чекаємо
+        # майнінгу: send_contract_tx лише розсилає (broadcast) і повертає
+        # хеш транзакції.
+        relay_tx_hash = chain.send_contract_tx(
+            self.w3,
+            config.FACILITATOR_WALLET_PRIVATE_KEY,
+            self.teurc.functions.transferWithAuthorization(
+                from_addr,
+                message["to"],
+                message["value"],
+                message["validAfter"],
+                message["validBefore"],
+                given_nonce,
+                authorization["v"],
+                authorization["r"],
+                authorization["s"],
+            ),
+        )
 
-    result = facilitator.verify_payment(tx_hash, photobank_addr, 0.02)
-    print(f"Перевірка справжньої оплати 0.02 WBT: {result}")
-    assert result["valid"] is True
+        fee_wei = (message["value"] * config.FACILITATOR_FEE_BPS) // 10_000
+        net_wei = message["value"] - fee_wei
 
-    replay_result = facilitator.verify_payment(tx_hash, photobank_addr, 0.02)
-    print(f"\nПовторна перевірка того ж tx (replay-захист): {replay_result}")
-    assert replay_result["valid"] is False
+        forward_tx_hash = None
+        if net_wei > 0 and config.SERVICE_PROVIDER_WALLET_ADDRESS:
+            forward_tx_hash = chain.send_contract_tx(
+                self.w3,
+                config.FACILITATOR_WALLET_PRIVATE_KEY,
+                self.teurc.functions.transfer(
+                    Web3.to_checksum_address(config.SERVICE_PROVIDER_WALLET_ADDRESS), net_wei
+                ),
+            )
 
-    wrong_amount = facilitator.verify_payment(
-        sw.send_wbt(author_key, photobank_addr, 0.01, test_w3), photobank_addr, 0.02
-    )
-    print(f"\nПеревірка заниженої суми (0.01 замість 0.02): {wrong_amount}")
-    assert wrong_amount["valid"] is False
-
-    fake_tx = "0x" + "00" * 32
-    fake_result = facilitator.verify_payment(fake_tx, photobank_addr, 0.02)
-    print(f"\nПеревірка неіснуючої транзакції: {fake_result}")
-    assert fake_result["valid"] is False
-
-    Path(".test_used_tx.json").unlink(missing_ok=True)
-    print("\nУсі перевірки пройшли ✅")
+        scale = 10**config.TEURC_DECIMALS
+        return {
+            "valid": True,
+            "reason": "Оплату прийнято офчейн; релей у мережу відправлено.",
+            "reputation_tier": reputation_tier,
+            "soul_id": kya["soul_id"],
+            "amount_teurc": message["value"] / scale,
+            "fee_teurc": fee_wei / scale,
+            "net_to_service_provider_teurc": net_wei / scale,
+            "relay_tx_hash": relay_tx_hash,
+            "forward_tx_hash": forward_tx_hash,
+        }
