@@ -7,3 +7,10 @@ venv/
 .facilitator_used_tx.json
 downloaded_photos/
 *.egg-info/
+
+# Hardhat / Node
+node_modules/
+artifacts/
+cache/
+typechain-types/
+dist/

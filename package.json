@@ -1,0 +1,20 @@
+{
+  "name": "agentpay-whitechain-contracts",
+  "version": "0.1.0",
+  "description": "Solidity contracts for AgentPay on Whitechain: tEURC (EIP-3009 test stablecoin) and WB Soul KYA/SBT mocks",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run deploy/deploy.ts --network localhost",
+    "deploy:testnet": "hardhat run deploy/deploy.ts --network whitechain_testnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.6.1",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.29.0",
+    "typescript": "^5.6.0"
+  }
+}
