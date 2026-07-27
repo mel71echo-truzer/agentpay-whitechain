@@ -1,15 +1,13 @@
-"""Агент-Автор (покупець) — Частина 4 з ТЗ. Найцікавіша частина: тут Claude
-через tool use САМ вирішує, коли платити.
+"""Агент-Автор (покупець) — тут Claude через tool use САМ вирішує, коли платити.
 
 Як це працює: ми даємо Claude інструмент "buy_photo". Claude бачить
-завдання ("напиши статтю про Київ"), список доступних фото у Фотобанку і
-сам вирішує, які саме купити і скільки — модель не знає заздалегідь, що
+завдання ("напиши статтю про Київ"), список доступних фото в AI Service
+Provider-і і сам вирішує, які саме купити — модель не знає заздалегідь, що
 "треба заплатити": вона просто викликає інструмент buy_photo, а вже
-всередині цього інструменту (x402_client.pay_and_fetch) відбувається:
-запит -> 402 Payment Required -> автономна оплата WBT на Whitechain ->
-повторний запит -> фото. Claude про сам факт оплати навіть не думає —
-для нього це просто "купівля фото", деталі x402/блокчейну сховані за
-інструментом. Це і є суть демо: агент платить агенту без участі людини.
+всередині (agent_client.pay_and_fetch) відбувається: запит -> 402 Payment
+Required -> офчейн-підпис EIP-3009 authorization -> facilitator валідує
+KYA/reputation/підпис і релеїть оплату в tEURC -> фото. Claude про сам факт
+оплати навіть не думає — деталі x402/EIP-3009/KYA сховані за інструментом.
 """
 
 import json
@@ -21,16 +19,18 @@ import anthropic
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
-from author.x402_client import PaymentFailed, SpendLedger, SpendLimitExceeded, pay_and_fetch  # noqa: E402
+from agent_client import PaymentFailed, SpendLedger, SpendLimitExceeded, pay_and_fetch  # noqa: E402
 
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
 BUY_PHOTO_TOOL = {
     "name": "buy_photo",
     "description": (
-        "Купує одне фото у Фотобанку за адресою PHOTOBANK_BASE_URL/photo/{name}. "
-        "Автоматично оплачує WBT на Whitechain, якщо сервер вимагає оплату (402). "
-        "Повертає підтвердження покупки: чи вдалось, скільки заплачено, хеш транзакції."
+        "Купує одне фото в AI Service Provider-і за назвою. Автоматично підписує "
+        "офчейн-авторизацію оплати в tEURC (KYA/reputation-перевірку і релей у "
+        "мережу робить facilitator). Повертає підтвердження покупки: чи вдалось, "
+        "скільки заплачено, reputation_tier, причину відмови (якщо не KYA-верифікований "
+        "або немає потрібної репутації для преміум-ресурсу)."
     ),
     "input_schema": {
         "type": "object",
@@ -53,14 +53,14 @@ class AuthorAgent:
         self.ledger = SpendLedger()
         self.ledger.reset()
         self.purchases: list[dict] = []
-        # on_event(dict) — необов'язковий callback для гарного виводу в run_demo.py
+        # on_event(dict) — необов'язковий callback для гарного виводу в scripts/demo.py
         self.on_event = on_event or (lambda event: None)
 
     def _emit(self, **event) -> None:
         self.on_event(event)
 
     def _buy_photo_tool(self, name: str) -> dict:
-        url = f"{config.PHOTOBANK_BASE_URL}/photo/{name}"
+        url = f"{config.SERVICE_PROVIDER_BASE_URL}/photo/{name}"
         self._emit(type="requesting", photo=name)
         try:
             result = pay_and_fetch(url, ledger=self.ledger)
@@ -75,9 +75,9 @@ class AuthorAgent:
             self._emit(
                 type="paid",
                 photo=name,
-                amount_wbt=result.amount_wbt,
-                tx_hash=result.tx_hash,
-                explorer_link=result.explorer_link,
+                reputation_tier=result.reputation_tier,
+                fee_teurc=result.fee_teurc,
+                relay_tx_hash=result.relay_tx_hash,
             )
             out_dir = Path("downloaded_photos")
             out_dir.mkdir(exist_ok=True)
@@ -86,9 +86,9 @@ class AuthorAgent:
             self.purchases.append(
                 {
                     "photo": name,
-                    "amount_wbt": result.amount_wbt,
-                    "tx_hash": result.tx_hash,
-                    "explorer_link": result.explorer_link,
+                    "reputation_tier": result.reputation_tier,
+                    "fee_teurc": result.fee_teurc,
+                    "relay_tx_hash": result.relay_tx_hash,
                     "saved_to": str(out_path),
                 }
             )
@@ -96,23 +96,25 @@ class AuthorAgent:
 
         return {
             "success": True,
-            "amount_wbt": result.amount_wbt,
-            "tx_hash": result.tx_hash,
+            "reputation_tier": result.reputation_tier,
+            "relay_tx_hash": result.relay_tx_hash,
         }
 
     def run(self, task: str) -> dict:
         """Виконує завдання: пише статтю, купуючи потрібні фото через buy_photo."""
         import requests
 
-        photos_catalog = requests.get(f"{config.PHOTOBANK_BASE_URL}/photos", timeout=10).json()
+        photos_catalog = requests.get(f"{config.SERVICE_PROVIDER_BASE_URL}/photos", timeout=10).json()
 
         system_prompt = (
             "Ти — Агент-Автор. Тобі дають завдання написати коротку статтю. "
-            "Для ілюстрації статті тобі потрібні фотографії з Фотобанку. "
-            "У тебе є інструмент buy_photo(name) — він автоматично купує фото "
-            "(оплата в WBT на Whitechain відбувається сама, тобі не треба про неї думати). "
-            f"Доступні фото за ціною {photos_catalog['price_wbt']} WBT кожне: "
-            f"{', '.join(photos_catalog['photos'])}. "
+            "Для ілюстрації статті тобі потрібні фотографії з AI Service Provider-а. "
+            "У тебе є інструмент buy_photo(name) — він автоматично підписує оплату в tEURC "
+            "(деталі KYA/reputation/EIP-3009 сховані за інструментом, тобі не треба про них думати). "
+            f"Доступні фото за ціною {photos_catalog['price_teurc']} tEURC кожне: "
+            f"{', '.join(photos_catalog['photos'])}. Один з ресурсів — преміум "
+            f"({', '.join(photos_catalog['premium_resources'])}) і може бути недоступний, "
+            "якщо в тебе немає потрібної репутації — це нормально, спробуй інше фото. "
             "Обери 2-3 найбільш доречні фото для теми статті і купи їх по черзі "
             "через buy_photo. Коли всі потрібні фото куплено, напиши коротку статтю "
             "(3-5 речень) українською, яка згадує ці фото."
@@ -134,7 +136,7 @@ class AuthorAgent:
                 article = "".join(
                     block.text for block in response.content if block.type == "text"
                 )
-                return {"article": article, "purchases": self.purchases, "spent_wbt": self.ledger.spent_wbt}
+                return {"article": article, "purchases": self.purchases, "spent_teurc": self.ledger.spent_teurc}
 
             tool_results = []
             for block in response.content:
@@ -156,4 +158,4 @@ if __name__ == "__main__":
     outcome = agent.run(task_text)
     print("\n=== Стаття ===")
     print(outcome["article"])
-    print(f"\nВитрачено: {outcome['spent_wbt']} WBT, куплено фото: {len(outcome['purchases'])}")
+    print(f"\nВитрачено: {outcome['spent_teurc']} tEURC, куплено фото: {len(outcome['purchases'])}")

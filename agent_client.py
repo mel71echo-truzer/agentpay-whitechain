@@ -51,6 +51,54 @@ class PaymentFailed(Exception):
     """Сервіс відхилив авторизацію (KYA, reputation, підпис, тощо)."""
 
 
+class SpendLimitExceeded(Exception):
+    """Ліміт витрат на завдання вичерпано — агент відмовляється платити далі."""
+
+
+class SpendLedger:
+    """Веде облік, скільки Автор уже витратив (у tEURC) у межах завдання.
+
+    Зберігається в JSON-файлі (config.SPEND_LEDGER_PATH), щоб ліміт
+    зберігався навіть якщо процес перезапустити всередині одного завдання.
+    """
+
+    def __init__(self, path: str | None = None, max_spend_teurc: float | None = None):
+        self.path = Path(path or config.SPEND_LEDGER_PATH)
+        self.max_spend_teurc = (
+            max_spend_teurc if max_spend_teurc is not None else config.AUTHOR_MAX_SPEND_TEURC
+        )
+        self._state = self._load()
+
+    def _load(self) -> dict:
+        if self.path.exists():
+            return json.loads(self.path.read_text())
+        return {"spent_teurc": 0.0, "payments": []}
+
+    def _save(self) -> None:
+        self.path.write_text(json.dumps(self._state, indent=2))
+
+    def reset(self) -> None:
+        """Скидає лічильник — виклич на початку нового завдання."""
+        self._state = {"spent_teurc": 0.0, "payments": []}
+        self._save()
+
+    @property
+    def spent_teurc(self) -> float:
+        return self._state["spent_teurc"]
+
+    def ensure_can_spend(self, amount_teurc: float) -> None:
+        if self.spent_teurc + amount_teurc > self.max_spend_teurc + 1e-12:
+            raise SpendLimitExceeded(
+                f"Ліміт вичерпано: вже витрачено {self.spent_teurc} tEURC, "
+                f"ще {amount_teurc} tEURC перевищить максимум {self.max_spend_teurc} tEURC на завдання."
+            )
+
+    def record(self, amount_teurc: float, to: str, relay_tx_hash: str | None) -> None:
+        self._state["spent_teurc"] += amount_teurc
+        self._state["payments"].append({"amount_teurc": amount_teurc, "to": to, "relay_tx_hash": relay_tx_hash})
+        self._save()
+
+
 @dataclass
 class PurchaseResult:
     content: bytes
@@ -181,7 +229,7 @@ def pay_and_fetch(
         settlement = json.loads(base64.b64decode(encoded_settlement))
 
     if ledger is not None:
-        ledger.record(price_teurc, pay_to, payload["authorization"]["nonce"])
+        ledger.record(price_teurc, pay_to, settlement.get("relay_tx_hash"))
 
     log.append("Ресурс отримано; авторизацію прийнято офчейн.")
 

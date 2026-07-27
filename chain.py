@@ -98,7 +98,7 @@ def deploy_contract(w3: Web3, deployer_key: str, name: str, *constructor_args) -
     tx = factory.constructor(*constructor_args).build_transaction(
         {
             "from": account.address,
-            "nonce": w3.eth.get_transaction_count(account.address),
+            "nonce": w3.eth.get_transaction_count(account.address, "pending"),
             "chainId": w3.eth.chain_id,
             "gasPrice": w3.eth.gas_price,
         }
@@ -125,7 +125,7 @@ def send_contract_tx(w3: Web3, sender_key: str, function_call, *, value_wei: int
     tx = function_call.build_transaction(
         {
             "from": account.address,
-            "nonce": w3.eth.get_transaction_count(account.address),
+            "nonce": w3.eth.get_transaction_count(account.address, "pending"),
             "chainId": w3.eth.chain_id,
             "gasPrice": w3.eth.gas_price,
             "value": value_wei,
