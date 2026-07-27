@@ -18,6 +18,34 @@ from eth_account import Account
 from web3 import Web3
 from web3.contract.contract import Contract
 
+import config
+
+_local_w3: Web3 | None = None
+
+
+def get_w3() -> Web3:
+    """Повертає Web3-з'єднання відповідно до config.NETWORK.
+
+    "whitechain_testnet" — реальний RPC з .env (WHITECHAIN_TESTNET_RPC).
+    "local" (за замовчуванням) — один спільний EthereumTesterProvider на
+    весь процес (не новий щоразу!), щоб facilitator, agent_client і
+    scripts/demo.py в одному запуску бачили ті самі контракти/транзакції.
+    """
+    global _local_w3
+
+    if config.NETWORK == "whitechain_testnet":
+        if not config.WHITECHAIN_TESTNET_RPC:
+            raise RuntimeError(
+                "NETWORK=whitechain_testnet, але WHITECHAIN_TESTNET_RPC не заданий у .env."
+            )
+        return Web3(Web3.HTTPProvider(config.WHITECHAIN_TESTNET_RPC))
+
+    if _local_w3 is None:
+        from web3 import EthereumTesterProvider
+
+        _local_w3 = Web3(EthereumTesterProvider())
+    return _local_w3
+
 _REPO_ROOT = Path(__file__).resolve().parent
 _ARTIFACTS_DIR = _REPO_ROOT / "artifacts" / "contracts"
 

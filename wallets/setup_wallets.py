@@ -1,12 +1,14 @@
-"""Гаманці на Whitechain testnet — Частина 1 з ТЗ.
+"""Гаманці на Whitechain testnet.
 
-Створює два EVM-гаманці (Автор і Фотобанк) через eth-account/web3.py напряму
-(без thirdweb — щоб розуміти базу), вміє перевіряти баланс WBT і відправляти
-WBT з одного гаманця на інший.
+Генерує EVM-гаманці через eth-account/web3.py напряму, вміє перевіряти
+баланс нативного WBT (gas-токен) і відправляти WBT з одного гаманця на
+інший. У Фазі 1 фактичні платежі йдуть у tEURC через EIP-3009
+(facilitator.py, agent_client.py) — цей файл лишається для того, що досі
+номіновано в нативному WBT: баланс на газ, faucet-перевірки.
 
 Запуск напряму (`python wallets/setup_wallets.py`) або без адрес у .env —
-генерує нову пару гаманців і виводить їх, з адресами і приватними ключами
-у .env, показує баланс WBT.
+генерує нову пару гаманців (Автор, Facilitator) і виводить їх, з адресами
+і приватними ключами у .env, показує баланс WBT.
 """
 
 import sys
@@ -21,12 +23,12 @@ import config  # noqa: E402
 
 def get_web3() -> Web3:
     """Створює з'єднання з Whitechain testnet через RPC з .env."""
-    if not config.WHITECHAIN_RPC_URL:
+    if not config.WHITECHAIN_TESTNET_RPC:
         raise RuntimeError(
-            "WHITECHAIN_RPC_URL не заданий у .env. "
+            "WHITECHAIN_TESTNET_RPC не заданий у .env. "
             "Візьми публічний RPC на docs.whitechain.io."
         )
-    return Web3(Web3.HTTPProvider(config.WHITECHAIN_RPC_URL))
+    return Web3(Web3.HTTPProvider(config.WHITECHAIN_TESTNET_RPC))
 
 
 def generate_wallet() -> tuple[str, str]:
@@ -71,7 +73,7 @@ def send_wbt(
         "to": to_address,
         "value": Web3.to_wei(amount_wbt, "ether"),
         "nonce": w3.eth.get_transaction_count(account.address),
-        "chainId": config.WHITECHAIN_CHAIN_ID,
+        "chainId": config.CHAIN_ID,
         "gasPrice": w3.eth.gas_price,
     }
     if data:
@@ -99,36 +101,37 @@ if __name__ == "__main__":
     print("=== Гаманці на Whitechain testnet ===\n")
 
     author_addr = config.AUTHOR_WALLET_ADDRESS
-    photobank_addr = config.PHOTOBANK_WALLET_ADDRESS
+    facilitator_addr = config.FACILITATOR_WALLET_ADDRESS
 
-    if not author_addr or not photobank_addr:
+    if not author_addr or not facilitator_addr:
         print("В .env ще немає адрес гаманців — генерую нові пари.\n")
         a_addr, a_key = generate_wallet()
-        p_addr, p_key = generate_wallet()
-        print("Гаманець Автора (покупець):")
+        f_addr, f_key = generate_wallet()
+        print("Гаманець Автора (агент-покупець, підписує EIP-3009):")
         print(f"  AUTHOR_WALLET_ADDRESS={a_addr}")
         print(f"  AUTHOR_WALLET_PRIVATE_KEY={a_key}")
-        print("\nГаманець Фотобанку (продавець):")
-        print(f"  PHOTOBANK_WALLET_ADDRESS={p_addr}")
-        print(f"  PHOTOBANK_WALLET_PRIVATE_KEY={p_key}")
+        print("\nГаманець Facilitator-а (релеїть транзакції, платить gas у WBT):")
+        print(f"  FACILITATOR_WALLET_ADDRESS={f_addr}")
+        print(f"  FACILITATOR_WALLET_PRIVATE_KEY={f_key}")
         print(
             "\nСкопіюй ці 4 рядки у свій .env, отримай тестові WBT з faucet на "
-            "docs.whitechain.io для AUTHOR_WALLET_ADDRESS, і запусти цей файл ще раз, "
-            "щоб побачити баланси."
+            "docs.whitechain.io для FACILITATOR_WALLET_ADDRESS (це він платить gas), "
+            "і запусти цей файл ще раз, щоб побачити баланси."
         )
     else:
         w3 = get_web3()
-        print(f"Підключено до Whitechain RPC. Chain ID очікується: {config.WHITECHAIN_CHAIN_ID}")
+        print(f"Підключено до Whitechain RPC. Chain ID очікується: {config.CHAIN_ID}")
         print(f"Фактичний chain ID мережі: {w3.eth.chain_id}\n")
 
         author_balance = check_balance(author_addr, w3)
-        photobank_balance = check_balance(photobank_addr, w3)
+        facilitator_balance = check_balance(facilitator_addr, w3)
 
-        print(f"Автор     ({author_addr}): {author_balance} WBT")
-        print(f"Фотобанк  ({photobank_addr}): {photobank_balance} WBT")
+        print(f"Автор        ({author_addr}): {author_balance} WBT")
+        print(f"Facilitator  ({facilitator_addr}): {facilitator_balance} WBT")
 
-        if author_balance == 0:
+        if facilitator_balance == 0:
             print(
-                "\nБаланс Автора нульовий. Отримай тестові WBT з faucet на "
-                "docs.whitechain.io на адресу вище і запусти файл знову."
+                "\nБаланс Facilitator-а нульовий. Саме він платить gas за релей "
+                "транзакцій — отримай тестові WBT з faucet на docs.whitechain.io "
+                "на адресу вище і запусти файл знову."
             )
