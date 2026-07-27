@@ -393,4 +393,4 @@ consciously left as roadmap, not overlooked:
 
 ## Contact
 
-[your name] · [Telegram / email / LinkedIn]
+Telegram [@kingsmel](https://t.me/kingsmel) · [mel71echo@gmail.com](mailto:mel71echo@gmail.com)
