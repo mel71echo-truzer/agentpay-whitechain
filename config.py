@@ -88,3 +88,16 @@ FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 # --- Ліміт витрат агента-автора на завдання ---
 AUTHOR_MAX_SPEND_TEURC = _float_env("AUTHOR_MAX_SPEND_TEURC", 1.0)
 SPEND_LEDGER_PATH = os.getenv("SPEND_LEDGER_PATH", ".spend_ledger.json")
+
+# --- Фаза 2: settlement, reputation, event store ---
+# Видавати ресурс лише ПІСЛЯ підтвердження блоку (SettlementConfirmed), а не
+# на broadcast — закриває off-chain race. true за замовчуванням; false — лише
+# для швидкого локального demo (trade-off задокументований у README).
+WAIT_FOR_CONFIRMATION = _bool_env("WAIT_FOR_CONFIRMATION", True)
+SETTLEMENT_CONFIRMATION_TIMEOUT = _int_env("SETTLEMENT_CONFIRMATION_TIMEOUT", 120)
+# N_target для нормалізації completed_payments у формулі репутації.
+REPUTATION_N_TARGET = _int_env("REPUTATION_N_TARGET", 20)
+# Локальне SQLite-сховище (agent_stats / events / capabilities).
+STORE_DB_PATH = os.getenv("STORE_DB_PATH", ".agentpay.db")
+# Тип можливості, який публікує наш AI Service Provider у Capability Registry.
+CAPABILITY_TYPE = os.getenv("CAPABILITY_TYPE", "image-generation")

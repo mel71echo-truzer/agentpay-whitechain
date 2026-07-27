@@ -1,83 +1,92 @@
-"""x402-facilitator для Whitechain — Фаза 1: KYA-гейт + reputation + EIP-3009.
+"""x402-facilitator — ТОНКИЙ оркестратор (Фаза 2, Компонент 1).
 
-Що змінилось порівняно з Фазою 0 (нативний WBT + txHash):
-- Оплата тепер у tEURC (ERC-20, EIP-3009) замість нативного WBT. Клієнт
-  підписує authorization ОФЧЕЙН (EIP-712) — facilitator валідує підпис
-  локально, без жодного виклику мережі, і тільки ПІСЛЯ повної офчейн-
-  валідації релеїть transferWithAuthorization у мережу.
-- Перед будь-якою перевіркою суми/підпису йде KYA-гейт: платник має мати
-  верифікований WB Soul. Без цього — відмова, незалежно від суми чи підпису.
-- Читається reputation агента (кількість SBT, прив'язаних до soul) —
-  сервіс може вимагати мінімальний tier для преміум-ресурсів.
-- Facilitator бере комісію (config.FACILITATOR_FEE_BPS, за замовчуванням
-  0.5%) і форвардить решту AI Service Provider-у окремим переказом (простіший
-  робочий варіант із двох, описаних у README/DEPLOY — без окремого
-  router-контракту, ціною двох послідовних транзакцій замість однієї
-  атомарної).
-- Контент видається одразу після успішної офчейн-валідації + релею в
-  мережу (широкосяг, без wait_for_transaction_receipt) — не чекаємо
-  підтвердження блоку в циклі запиту. Це свідомий trade-off, задокументований
-  у README: якщо релей пізніше провалиться (напр. нестача gas у
-  facilitator-а), контент уже буде видано без фактичної оплати. Прийнятно
-  для PoC; для продакшену треба або чекати підтвердження, або мати
-  страхувальний механізм (ретраї/моніторинг провалених релеїв).
+Раніше (Фаза 1) це був "god object": один клас робив читання WB Soul,
+розрахунок репутації, policy, EIP-712 валідацію, релей у мережу і формування
+відповіді. Фаза 2 розбила це на модулі з єдиною відповідальністю:
 
-KYA/reputation читаються через ОДИН і той самий інтерфейс незалежно від
-того, чи це MockSoulRegistry (config.USE_MOCK_SOUL=true) чи справжні WB
-Soul контракти на Whitechain (USE_MOCK_SOUL=false) — інтерфейси
-ISoulRegistry/ISoulAttributeRegistry/ISoulBoundTokenRegistry скопійовані
-1:1 з https://github.com/whitebit-exchange/soul-ecosystem-contracts.
+  identity.py    — читання WB Soul (soulOf + IsVerified + SBT) + репутація
+  reputation.py  — формула score/tier (Компонент 3)
+  policy.py      — allow/deny за identity + вимогами ресурсу
+  payment.py     — офчейн EIP-712/EIP-3009 валідація
+  settlement.py  — релей + форвард комісії (seam під atomic router у Фазі 2.5)
+  events.py      — журнал подій платіжного циклу (Компонент 4)
+  capability.py  — service discovery (Компонент 2)
+
+Цей клас лише ТРИМАЄ спільний контекст (w3, контракти, store, модулі) і
+ПОСЛІДОВНО їх викликає: identity -> policy -> payment -> settlement -> event
+-> response. Жодної бізнес-логіки тут немає — тільки послідовність.
+
+Зовнішній контракт verify_and_settle(...) і ключі результату збережені 1:1
+з Фази 1, тож service_provider/server.py і всі тести Фази 1 працюють без змін.
 """
+
+from __future__ import annotations
 
 import logging
 import sys
-import time as _time
 from pathlib import Path
 
-from eth_account import Account
-from eth_account.messages import encode_typed_data
 from web3 import Web3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import chain  # noqa: E402
 import config  # noqa: E402
+from facilitator import events as events_mod  # noqa: E402
+from facilitator import identity as identity_mod  # noqa: E402
+from facilitator import policy as policy_mod  # noqa: E402
+from facilitator import reputation as reputation_mod  # noqa: E402
+from facilitator.events import EventLog  # noqa: E402
+from facilitator.identity import IdentityReader  # noqa: E402
+from facilitator.payment import PaymentValidator  # noqa: E402
+from facilitator.settlement import SettlementEngine, SettlementError  # noqa: E402
+from facilitator.store import Store  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# EIP-712 типи для tEURC.TransferWithAuthorization — мають збігатися з
-# TRANSFER_WITH_AUTHORIZATION_TYPEHASH у contracts/tEURC.sol.
-TRANSFER_AUTH_TYPES = {
-    "TransferWithAuthorization": [
-        {"name": "from", "type": "address"},
-        {"name": "to", "type": "address"},
-        {"name": "value", "type": "uint256"},
-        {"name": "validAfter", "type": "uint256"},
-        {"name": "validBefore", "type": "uint256"},
-        {"name": "nonce", "type": "bytes32"},
-    ]
-}
-
-
-def _to_bytes32(value) -> bytes:
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    return bytes.fromhex(value.removeprefix("0x"))
-
 
 class WhitechainFacilitator:
-    def __init__(self, w3: Web3 | None = None):
+    def __init__(self, w3: Web3 | None = None, store: Store | None = None):
         self.w3 = w3 or chain.get_w3()
         self._assert_correct_chain()
 
+        self.store = store if store is not None else Store(config.STORE_DB_PATH)
+
+        # --- контрактні хендли ---
         self.teurc = chain.get_contract(self.w3, "tEURC", config.TEURC_ADDRESS)
-        self.soul_registry = chain.get_contract(self.w3, "ISoulRegistry", config.SOUL_REGISTRY_ADDRESS)
-        self.attribute_registry = chain.get_contract(
+        soul_registry = chain.get_contract(self.w3, "ISoulRegistry", config.SOUL_REGISTRY_ADDRESS)
+        attribute_registry = chain.get_contract(
             self.w3, "ISoulAttributeRegistry", config.SOUL_ATTRIBUTE_REGISTRY_ADDRESS
         )
-        self.sbt_registry = chain.get_contract(
+        sbt_registry = chain.get_contract(
             self.w3, "ISoulBoundTokenRegistry", config.SOUL_BOUND_TOKEN_REGISTRY_ADDRESS
         )
-        self.is_verified_attribute = Web3.to_checksum_address(config.IS_VERIFIED_ATTRIBUTE_ADDRESS)
+
+        # --- модулі (кожен з однією відповідальністю) ---
+        self.identity = IdentityReader(
+            soul_registry,
+            attribute_registry,
+            sbt_registry,
+            config.IS_VERIFIED_ATTRIBUTE_ADDRESS,
+            self.store,
+            n_target=config.REPUTATION_N_TARGET,
+        )
+        self.payment = PaymentValidator(
+            self.w3,
+            self.teurc,
+            facilitator_address=config.FACILITATOR_WALLET_ADDRESS,
+            teurc_decimals=config.TEURC_DECIMALS,
+        )
+        self.settlement = SettlementEngine(
+            self.w3,
+            self.teurc,
+            facilitator_private_key=config.FACILITATOR_WALLET_PRIVATE_KEY,
+            service_provider_address=config.SERVICE_PROVIDER_WALLET_ADDRESS,
+            fee_bps=config.FACILITATOR_FEE_BPS,
+            teurc_decimals=config.TEURC_DECIMALS,
+            wait_for_confirmation=config.WAIT_FOR_CONFIRMATION,
+            confirmation_timeout=config.SETTLEMENT_CONFIRMATION_TIMEOUT,
+        )
+        self.events = EventLog(self.store)
 
     def _assert_correct_chain(self) -> None:
         """Fail fast на старті, якщо RPC веде не на той ланцюжок."""
@@ -96,36 +105,9 @@ class WhitechainFacilitator:
                 f"testnet chain_id={config.CHAIN_ID}. Перевір WHITECHAIN_TESTNET_RPC/CHAIN_ID у .env."
             )
 
-    def _eip712_domain(self) -> dict:
-        return {
-            "name": "Test EURC",
-            "version": "1",
-            "chainId": self.w3.eth.chain_id,
-            "verifyingContract": self.teurc.address,
-        }
-
-    def check_kya(self, address: str) -> dict:
-        """KYA-гейт + reputation-читання для `address`.
-
-        Повертає {"ok": True, "soul_id":..., "reputation_tier":...}
-        або {"ok": False, "reason": "..."}.
-        """
-        address = Web3.to_checksum_address(address)
-        soul_id = self.soul_registry.functions.soulOf(address).call()
-        if soul_id == 0:
-            return {"ok": False, "reason": "Агент не має верифікованого WB Soul (not KYA-verified)."}
-
-        raw_value = self.attribute_registry.functions.soulAttributeValue(
-            soul_id, self.is_verified_attribute
-        ).call()
-        verified = bytes(raw_value) != b"\x00" * 20
-        if not verified:
-            return {"ok": False, "reason": "KYC агента не активний (KYA not active)."}
-
-        sbt_count = self.sbt_registry.functions.tokensCountBySoul(soul_id).call()
-        reputation_tier = 0 if sbt_count == 0 else (1 if sbt_count == 1 else 2)
-
-        return {"ok": True, "soul_id": soul_id, "reputation_tier": reputation_tier}
+    def get_agent_identity(self, address: str) -> dict:
+        """Тонкий прокидач у identity-модуль (зручно для demo/тестів)."""
+        return self.identity.get_agent_identity(address)
 
     def verify_and_settle(
         self,
@@ -135,142 +117,89 @@ class WhitechainFacilitator:
         price_teurc: float,
         min_reputation_tier: int = 0,
     ) -> dict:
-        """Перевіряє KYA + reputation + офчейн-підпис + прив'язку до ресурсу,
-        і якщо все гаразд — релеїть оплату в мережу та форвардить комісію.
-
-        authorization: {"from","to","value","validAfter","validBefore","nonce","v","r","s"}
-        resource_salt: hex-рядок (32 байти) — разом з `resource` дає nonce
-            (keccak256(resource || salt)), який має збігатися з
-            authorization["nonce"]. Це прив'язує саме цю авторизацію до
-            саме цього ресурсу (той самий принцип, що calldata-прив'язка
-            у Фазі 0, адаптований під EIP-3009, де немає вільного data-поля).
-
-        Повертає dict з "valid" (bool), "reason", і — де застосовно —
-        "reputation_tier", "soul_id", txhashes і суми.
+        """Оркеструє повний цикл: identity -> policy -> payment -> settlement
+        -> event -> response. Сигнатура і ключі результату — як у Фазі 1.
         """
         from_addr = Web3.to_checksum_address(authorization["from"])
+        emitted: list[dict] = []
 
-        # 1. KYA-гейт — перед будь-чим іншим.
-        kya = self.check_kya(from_addr)
-        if not kya["ok"]:
-            return {"valid": False, "reason": kya["reason"]}
-        reputation_tier = kya["reputation_tier"]
+        def emit(event_type: str, tx_hash: str | None = None) -> None:
+            emitted.append(self.events.emit(event_type, agent=from_addr, resource=resource, tx_hash=tx_hash))
 
-        # 2. Reputation-гейт (якщо ресурс його вимагає).
-        if reputation_tier < min_reputation_tier:
-            return {
-                "valid": False,
-                "reason": (
-                    f"Недостатня репутація: tier {reputation_tier} < потрібно "
-                    f"{min_reputation_tier} (insufficient reputation)."
-                ),
-                "reputation_tier": reputation_tier,
-            }
+        emit(events_mod.PAYMENT_REQUESTED)
 
-        # 3. Прив'язка до ресурсу: nonce має дорівнювати keccak256(resource || salt).
-        try:
-            salt_bytes = _to_bytes32(resource_salt)
-            given_nonce = _to_bytes32(authorization["nonce"])
-        except ValueError:
-            return {"valid": False, "reason": "Некоректний формат nonce/salt.", "reputation_tier": reputation_tier}
+        # 1. Identity (WB Soul + reputation).
+        agent_identity = self.identity.get_agent_identity(from_addr)
 
-        expected_nonce = Web3.keccak(resource.encode("utf-8") + salt_bytes)
-        if expected_nonce != given_nonce:
-            return {
-                "valid": False,
-                "reason": "Авторизація призначена для іншого ресурсу (resource binding mismatch).",
-                "reputation_tier": reputation_tier,
-            }
-
-        # 4. Офчейн-валідація підпису — жодного виклику мережі.
-        message = {
-            "from": from_addr,
-            "to": Web3.to_checksum_address(authorization["to"]),
-            "value": int(authorization["value"]),
-            "validAfter": int(authorization["validAfter"]),
-            "validBefore": int(authorization["validBefore"]),
-            "nonce": given_nonce,
-        }
-        signable = encode_typed_data(self._eip712_domain(), TRANSFER_AUTH_TYPES, message)
-        try:
-            recovered = Account.recover_message(
-                signable, vrs=(authorization["v"], authorization["r"], authorization["s"])
-            )
-        except Exception as exc:  # noqa: BLE001 — навмисно широкий: будь-яка погана вхідна структура
-            logger.warning("Не вдалося відновити підписанта: %s", exc)
-            return {"valid": False, "reason": "Некоректний підпис.", "reputation_tier": reputation_tier}
-
-        if recovered.lower() != from_addr.lower():
-            return {"valid": False, "reason": "Підпис не відповідає полю 'from'.", "reputation_tier": reputation_tier}
-
-        # 5. Часове вікно — та сама умова, що й у контракті (тут — щоб
-        # відмовити швидко, без витрат на завідомо марний релей).
-        now = int(_time.time())
-        if now <= message["validAfter"]:
-            return {"valid": False, "reason": "Авторизація ще не дійсна.", "reputation_tier": reputation_tier}
-        if now >= message["validBefore"]:
-            return {"valid": False, "reason": "Авторизація протермінована.", "reputation_tier": reputation_tier}
-
-        # 6. Anti-replay: nonce не використаний ОНЧЕЙН (джерело істини — сам контракт).
-        if self.teurc.functions.authorizationState(from_addr, given_nonce).call():
-            return {"valid": False, "reason": "Ця авторизація вже використана (replay).", "reputation_tier": reputation_tier}
-
-        # 7. Сума і отримувач.
-        if message["to"].lower() != config.FACILITATOR_WALLET_ADDRESS.lower():
-            return {
-                "valid": False,
-                "reason": "Авторизація призначена не на адресу facilitator-а.",
-                "reputation_tier": reputation_tier,
-            }
-        price_wei = round(price_teurc * (10**config.TEURC_DECIMALS))
-        if message["value"] < price_wei:
-            return {
-                "valid": False,
-                "reason": f"Сума замала: {message['value']} < {price_wei} (потрібна ціна ресурсу).",
-                "reputation_tier": reputation_tier,
-            }
-
-        # Усі перевірки пройдено офчейн — релеїмо в мережу. Не чекаємо
-        # майнінгу: send_contract_tx лише розсилає (broadcast) і повертає
-        # хеш транзакції.
-        relay_tx_hash = chain.send_contract_tx(
-            self.w3,
-            config.FACILITATOR_WALLET_PRIVATE_KEY,
-            self.teurc.functions.transferWithAuthorization(
-                from_addr,
-                message["to"],
-                message["value"],
-                message["validAfter"],
-                message["validBefore"],
-                given_nonce,
-                authorization["v"],
-                authorization["r"],
-                authorization["s"],
-            ),
+        # 2. Policy (KYA + reputation gate).
+        decision = policy_mod.check_policy(
+            agent_identity, {"min_reputation_tier": min_reputation_tier, "price_teurc": price_teurc}
         )
+        if not decision["allow"]:
+            return self._deny(decision["reason"], agent_identity, emitted)
 
-        fee_wei = (message["value"] * config.FACILITATOR_FEE_BPS) // 10_000
-        net_wei = message["value"] - fee_wei
+        # 3. Payment (офчейн EIP-712/EIP-3009 валідація).
+        validation = self.payment.validate_authorization(authorization, resource, resource_salt, price_teurc)
+        if not validation["ok"]:
+            return self._deny(validation["reason"], agent_identity, emitted)
+        emit(events_mod.AUTHORIZATION_VALIDATED)
 
-        forward_tx_hash = None
-        if net_wei > 0 and config.SERVICE_PROVIDER_WALLET_ADDRESS:
-            forward_tx_hash = chain.send_contract_tx(
-                self.w3,
-                config.FACILITATOR_WALLET_PRIVATE_KEY,
-                self.teurc.functions.transfer(
-                    Web3.to_checksum_address(config.SERVICE_PROVIDER_WALLET_ADDRESS), net_wei
-                ),
-            )
+        # 4. Settlement (релей + форвард комісії).
+        try:
+            result = self.settlement.settle(validation["message"], authorization)
+        except SettlementError as exc:
+            logger.warning("Settlement провалився: %s", exc)
+            return self._deny(f"Розрахунок не вдався: {exc}", agent_identity, emitted)
+        emit(events_mod.SETTLEMENT_SUBMITTED, tx_hash=result["relay_tx_hash"])
+        if result["confirmed"]:
+            emit(events_mod.SETTLEMENT_CONFIRMED, tx_hash=result["relay_tx_hash"])
+
+        # 5. Post-settlement: оновлюємо поведінкову статистику + reputation-anchor.
+        self._record_completed_payment(from_addr, agent_identity)
+
+        # 6. Access granted (ресурс видається на цьому кроці — після
+        # SettlementConfirmed, якщо WAIT_FOR_CONFIRMATION=true).
+        emit(events_mod.ACCESS_GRANTED, tx_hash=result["relay_tx_hash"])
 
         scale = 10**config.TEURC_DECIMALS
         return {
             "valid": True,
-            "reason": "Оплату прийнято офчейн; релей у мережу відправлено.",
-            "reputation_tier": reputation_tier,
-            "soul_id": kya["soul_id"],
-            "amount_teurc": message["value"] / scale,
-            "fee_teurc": fee_wei / scale,
-            "net_to_service_provider_teurc": net_wei / scale,
-            "relay_tx_hash": relay_tx_hash,
-            "forward_tx_hash": forward_tx_hash,
+            "reason": "Оплату прийнято офчейн; розрахунок проведено.",
+            "reputation_tier": agent_identity["reputation_tier"],
+            "reputation_score": agent_identity["reputation_score"],
+            "soul_id": agent_identity["soul_id"],
+            "amount_teurc": validation["message"]["value"] / scale,
+            "fee_teurc": result["fee_wei"] / scale,
+            "net_to_service_provider_teurc": result["net_wei"] / scale,
+            "relay_tx_hash": result["relay_tx_hash"],
+            "forward_tx_hash": result["forward_tx_hash"],
+            "settlement_status": result["status"],
+            "events": emitted,
         }
+
+    def _deny(self, reason: str, agent_identity: dict, emitted: list[dict]) -> dict:
+        return {
+            "valid": False,
+            "reason": reason,
+            "reputation_tier": agent_identity.get("reputation_tier") if agent_identity.get("has_soul") else None,
+            "events": emitted,
+        }
+
+    def _record_completed_payment(self, address: str, agent_identity: dict) -> None:
+        """Оновлює лічильник completed_payments і логує reputation-anchor,
+        якщо агент перетнув поріг tier (реальний mint SBT — TODO/demo)."""
+        tier_before = agent_identity["reputation_tier"]
+        self.store.increment_completed_payment(address)
+
+        # Перерахунок після інкремента — суто для anchor-логу (не для гейту цього запиту).
+        new_identity = self.identity.get_agent_identity(address)
+        tier_after = new_identity["reputation_tier"]
+        if tier_after > tier_before:
+            logger.info(
+                "reputation-anchor: agent=%s crossed tier %d -> %d; SBT tier %d would be minted "
+                "(MockSoulRegistry.issueSBT у demo; на реальному WB Soul — TODO)",
+                address,
+                tier_before,
+                tier_after,
+                tier_after,
+            )

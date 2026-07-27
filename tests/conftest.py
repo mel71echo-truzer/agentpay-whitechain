@@ -97,9 +97,13 @@ def facilitator_setup(tmp_path):
     tx = chain.send_contract_tx(w3, deployer.key.hex(), soul_registry.functions.issueSBT(verified_soul_id, 1))
     w3.eth.wait_for_transaction_receipt(tx)
 
+    from facilitator.store import Store
     from facilitator.whitechain_facilitator import WhitechainFacilitator
 
-    facilitator = WhitechainFacilitator(w3=w3)
+    # Ізольоване in-memory сховище на кожен тест (agent_stats/events/capabilities),
+    # щоб completed_payments одного тесту не текли в інший.
+    store = Store(":memory:")
+    facilitator = WhitechainFacilitator(w3=w3, store=store)
 
     return FacilitatorFixture(
         w3=w3,
