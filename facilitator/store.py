@@ -12,22 +12,70 @@
 
 from __future__ import annotations
 
+import fcntl
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
 
+class StoreLockError(RuntimeError):
+    """Файл БД уже відкрито іншим процесом/інстансом Store.
+
+    Кидається на старті, коли ексклюзивний файловий лок узяти не вдалося —
+    ознака, що запущено кілька воркерів/процесів на тому самому файлі БД.
+    Див. інваріант «один процес» нижче.
+    """
+
+
 class Store:
+    # ІНВАРІАНТ КОНКУРЕНТНОСТІ (свідома межа, не недогляд):
+    # self._lock (threading.Lock) серіалізує записи ТІЛЬКИ в межах ОДНОГО
+    # процесу. Кілька процесів (напр. `uvicorn --workers N` або кілька
+    # інстансів) мали б кожен свій Lock і свою серіалізацію — атомарність
+    # лічильників (increment_completed_payment тощо) втратилася б, бо
+    # read-modify-write у різних процесах не координується Python-локом.
+    # Тому система розрахована на ОДИН процес, і це тут форсується
+    # ексклюзивним файловим локом (fcntl.flock) на сайдкар-файлі `<db>.lock`:
+    # другий процес/інстанс на тому самому файлі БД падає зі StoreLockError
+    # на старті — гучно, а не тихо ламаючи інваріанти.
+    # Для горизонтального масштабування (кілька процесів) цього НЕ досить —
+    # знадобляться транзакції рівня БД (напр. SELECT ... FOR UPDATE у
+    # Postgres) або міжпроцесні блокування. Це свідомо поза скоупом PoC:
+    # межу зафіксовано, БД не мігровано.
     def __init__(self, db_path: str = ":memory:"):
         self.db_path = db_path
+        self._flock_fd = None
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._acquire_single_process_lock(db_path)
         # check_same_thread=False: uvicorn обслуговує sync-роут у тред-пулі.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._init_schema()
+
+    def _acquire_single_process_lock(self, db_path: str) -> None:
+        """Бере ексклюзивний неблокуючий файловий лок на `<db>.lock`.
+
+        Якщо лок уже тримає інший процес/інстанс — flock поверне EAGAIN,
+        і ми падаємо зі StoreLockError замість тихо запуститися другим
+        воркером і зламати in-process-серіалізацію. `:memory:` сюди не
+        потрапляє (окрема БД на з'єднання).
+        """
+        lock_path = f"{db_path}.lock"
+        fd = open(lock_path, "w")  # noqa: SIM115 — тримаємо fd весь час життя Store
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            fd.close()
+            raise StoreLockError(
+                f"Файл БД '{db_path}' уже відкрито іншим процесом/інстансом Store. "
+                "Система розрахована на ОДИН процес — не запускайте кілька воркерів "
+                "(`uvicorn --workers N`) чи інстансів на тому самому STORE_DB_PATH. "
+                "Для масштабування потрібні транзакції рівня БД, а не Python-Lock."
+            ) from exc
+        self._flock_fd = fd
 
     def _init_schema(self) -> None:
         with self._lock, self._conn:
@@ -183,3 +231,9 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        if self._flock_fd is not None:
+            # Звільняємо файловий лок — легітимний рестарт того ж процесу
+            # (напр. у тестах) зможе відкрити БД знову.
+            fcntl.flock(self._flock_fd.fileno(), fcntl.LOCK_UN)
+            self._flock_fd.close()
+            self._flock_fd = None
