@@ -16,3 +16,8 @@ typechain-types/
 dist/
 .agentpay.db
 registry.json
+
+# coverage artifacts
+.coverage
+htmlcov/
+coverage.xml

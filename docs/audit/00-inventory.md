@@ -122,11 +122,24 @@ decimals) — `config.py:60-61`, контракт `contracts/tEURC.sol`. Нат�
 - **Залишок від ділення комісії** (`value*bps` не кратне 10_000) через floor
   `//` дістається **нетто (сервісу)**, а не комісії: `net = value - floor(fee)`.
   Джерело: `settlement.py:95-96`. Впевненість: **точно**.
-- **`round()` наразі нейтралізує float-похибку** конвертації ціни для
-  сконфігурованих значень (перевірив `4.10*1e6 = 4099999.9999999995` →
-  `round`→`4100000`). Тобто float-представлення ціни є, але межа
-  конвертації зараз безпечна *завдяки round*. Впевненість: **ймовірно** (не
-  для всіх можливих `.env`-значень доводив).
+- **`round(price*1e6)` перевірено емпірично на всьому діапазоні представних
+  цін, не одним прикладом.** Детермінований тест
+  `tests/test_price_scaling_audit.py` порівнює поточний шлях
+  `round(float(price)*1e6)` з точною конверсією через `Decimal(price)*1e6`
+  (ROUND_HALF_UP):
+  - **вичерпно** 0.000000..0.050000 з кроком 1e-6 (50 001 значення) +
+    **200 000** випадкових цін до ~9999.999999 (фіксований seed) +
+    сконфігуровані ціни → **жодного розходження** для цін з ≤6 знаками
+    (тобто представних у 6-decimal токені). Впевненість: **точно** (у межах
+    протестованого діапазону — 250k+ значень, нуль дивергенцій).
+  - **АЛЕ** для цін з >6 знаками (суб-wei, тонше за точність токена) точна
+    сума у wei — не ціле число; поточний код **мовчки округлює** її замість
+    відхиляти ціну. Це не поточне мисцінування (сконфігуровані ціни ≤2 знаки),
+    а **крихкість + мовчазне округлення нелегальної ціни**. Класифікація:
+    **MAJOR** (не CRITICAL — розходження на легальних цінах немає), знімається
+    рішенням №4 (Decimal→int на завантаженні + відхилення цін з >6 знаками).
+    Джерело: `tests/test_price_scaling_audit.py`,
+    `test_sub_wei_prices_are_not_exactly_representable`.
 - **Decimal не використовується ніде** (`grep` по репо). Впевненість: **точно**.
 - **Офчейн-накопичувачі — float** (`spent_teurc`, `earned_teurc`) → дрейф при
   багатьох операціях. Це **не** авторитетна сума, але це spend-cap-гейт і
@@ -233,9 +246,46 @@ on-chain nonce (`:111`), отримувач `to == FACILITATOR_WALLET_ADDRESS`
 | Факт | Значення | Джерело |
 |---|---|---|
 | Каркас | pytest; фікстура на локальному EthereumTesterProvider | `tests/conftest.py` |
-| Проходять зараз | **так, 36 passed** (щойно прогнав) | `pytest tests/ -q` |
+| Проходять зараз | **49 passed** (36 базових + 13 price-scaling-аудит) | `pytest tests/ -q` |
 | Solidity-тести | 14 (окремо, `npx hardhat test`) — у цю Фазу не переганяв повторно | `test-solidity/` |
-| Файли тестів | `test_facilitator, test_reputation, test_policy, test_capability, test_identity, test_events` | `tests/` |
+| Файли тестів | `test_facilitator, test_reputation, test_policy, test_capability, test_identity, test_events, test_price_scaling_audit` | `tests/` |
+| Проходять зараз | **49 passed** (додано 13 у price-scaling-аудиті) | `pytest -q` |
+
+**Покриття в цифрах (`pytest --cov`, зріз цієї Фази):** TOTAL **74%** (308/1168
+рядків непокрито). По модулях (money/security-критичні виділено):
+
+| Модуль | Cover | Непокриті рядки | Це грошовий/security шлях? |
+|---|---|---|---|
+| `facilitator/reputation.py` | 100% | — | — |
+| `facilitator/policy.py` | 100% | — | — |
+| `facilitator/capability.py` | 100% | — | discovery-реєстр (авторизація — окремо) |
+| `facilitator/events.py` | 100% | — | — |
+| `facilitator/identity.py` | 97% | 47 | KYA/репутація |
+| `facilitator/store.py` | 94% | 25, 133, 184-185 | стан (лічильники, події) |
+| `facilitator/settlement.py` | 94% | **92, 112** | **ТАК — гілки збою релею/форварду** |
+| `facilitator/payment.py` | 85% | 44, 71-72, **96-98, 106, 116** | **ТАК — валідація підпису/вікна/отримувача** |
+| `facilitator/whitechain_facilitator.py` | 93% | 95-97, 103, 110 | оркестрація відмов |
+| `agent_client.py` | **50%** | 93-97,100-102,105,109-110,**114,124-126**,208-263 | **ТАК — підпис auth + SpendLedger float RMW + pay_and_fetch** |
+| `service_provider/server.py` | **0%** | 27-262 | **ТАК — `/photo`,`/registry`,`_ledger` earned += (241)** |
+| `author/agent.py` | 0% | 13-161 | не в грошовому шляху рантайму (мертвий, 1.1) |
+| `wallets/setup_wallets.py` | 0% | 14-133 | нативний WBT (gas), поза сеттлментом |
+| `chain.py` | 88% | 37-41, 77, 79, 112 | інфра w3 |
+| `config.py` | 98% | 35 | — |
+
+**Непокриті гілки саме в ГРОШОВИХ шляхах (пріоритет Фази 2):**
+1. `settlement.py:92` — **relay reverted** (`transferWithAuthorization` не
+   пройшов) → `SettlementError`. Не покрито. (Фаза 2 M2)
+2. `settlement.py:112` — **forward reverted** (нетто сервісу не переслано,
+   кошти вже у facilitator) → частковий збій A3. Не покрито. (Фаза 2 M2)
+3. `payment.py:96-98` — гілка **невідновленого/чужого підпису** (recover !=
+   from). Не покрито прямим юнітом. (Фаза 2 M3)
+4. `payment.py:106` — **прострочене/ще-не-дійсне** часове вікно. Не покрито.
+5. `payment.py:116` — **`to != facilitator`** (перенаправлення отримувача).
+   Не покрито.
+6. `agent_client.py:124-126` — **`SpendLedger` float `+=`** (RMW без локу,
+   spend-cap-гейт). Не покрито. (знімається рішенням №4)
+7. `service_provider/server.py:241` — **`earned_teurc += net`** (float-облік
+   заробітку). Файл 0% покриття взагалі. (знімається №4 + тест сервера)
 
 **Покриті:** формула репутації (юніт), policy (юніт), capability
 resolve/list (юніт), identity (verified/no-soul/no-sbt/behavioral),
