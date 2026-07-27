@@ -1,4 +1,7 @@
-# Додаткові залежності лише для розробки/тестів — НЕ потрібні для запуску run_demo.py.
-# eth-tester[py-evm] дає локальний EVM-ланцюжок в пам'яті, потрібен тільки для
-# tests/local_integration_test.py (перевірка пайплайна без реального Whitechain RPC).
+# Додаткові залежності лише для розробки/тестів — НЕ потрібні для запуску scripts/demo.py
+# проти реального Whitechain testnet.
+# eth-tester[py-evm] дає локальний EVM-ланцюжок в пам'яті — NETWORK=local (за замовчуванням)
+# використовує його і для scripts/demo.py, і для tests/.
 eth-tester[py-evm]
+pytest>=8.0.0
+
