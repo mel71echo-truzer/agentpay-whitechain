@@ -51,8 +51,35 @@ class PaymentFailed(Exception):
     """Сервіс відхилив авторизацію (KYA, reputation, підпис, тощо)."""
 
 
+class CapabilityNotFound(Exception):
+    """Реєстр не має активного провайдера потрібного типу."""
+
+
 class SpendLimitExceeded(Exception):
     """Ліміт витрат на завдання вичерпано — агент відмовляється платити далі."""
+
+
+def discover_capabilities(registry_url: str, capability_type: str | None = None) -> list[dict]:
+    """Питає Capability Registry (service discovery) за списком можливостей.
+
+    registry_url — базовий URL реєстру (у PoC той самий процес, що й сервіс).
+    """
+    params = {"type": capability_type} if capability_type else {}
+    resp = requests.get(f"{registry_url}/registry/capabilities", params=params, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("capabilities", [])
+
+
+def resolve_provider_url(registry_url: str, capability_type: str) -> str:
+    """Знаходить provider_url для типу можливості через реєстр (не хардкод).
+
+    Це і є суть Компонента 2: агент НЕ знає адресу сервісу заздалегідь —
+    він її резолвить за capability_type.
+    """
+    caps = discover_capabilities(registry_url, capability_type)
+    if not caps:
+        raise CapabilityNotFound(f"Реєстр не має активного провайдера типу '{capability_type}'.")
+    return caps[0]["provider_url"]
 
 
 class SpendLedger:

@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+from facilitator.capability import CapabilityRegistry  # noqa: E402
 from facilitator.whitechain_facilitator import WhitechainFacilitator  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,31 @@ _MAX_BODY_FIELD_LEN = 4096
 # `if __name__ == "__main__"` нижче, або scripts/demo.py.
 facilitator: WhitechainFacilitator | None = None
 
+# Capability Registry (service discovery) — ділить store з facilitator-ом.
+# Ініціалізується разом із facilitator через init_facilitator().
+capability_registry: CapabilityRegistry | None = None
+
 # Стан AI Service Provider тримаємо в пам'яті процесу — для PoC-демо цього достатньо.
 _ledger = {"earned_teurc": 0.0, "sales": []}
+
+
+def init_facilitator(fac: WhitechainFacilitator) -> None:
+    """Прив'язує facilitator і піднімає Capability Registry на його store,
+    засіваючи один запис — цей AI Service Provider. Викликається реальним
+    запуском (`__main__`) і scripts/demo.py."""
+    global facilitator, capability_registry
+    facilitator = fac
+    capability_registry = CapabilityRegistry(fac.store)
+    capability_registry.register(
+        {
+            "id": "ai-service-provider-1",
+            "capability_type": config.CAPABILITY_TYPE,
+            "provider_url": config.SERVICE_PROVIDER_BASE_URL,
+            "price": config.RESOURCE_PRICE_TEURC,
+            "min_reputation_tier": 0,
+            "active": True,
+        }
+    )
 
 
 def _price_and_tier_for(name: str) -> tuple[float, int]:
@@ -93,6 +117,32 @@ def _resolve_image(name: str) -> Path | None:
         return None
     image_path = IMAGES_DIR / f"{name}.png"
     return image_path if image_path.exists() else None
+
+
+@app.get("/registry/capabilities")
+def registry_capabilities(type: str | None = None):
+    """Service discovery: список активних можливостей (опц. фільтр за type)."""
+    if capability_registry is None:
+        return JSONResponse(status_code=503, content={"error": "Реєстр ще не ініціалізований."})
+    return {"capabilities": capability_registry.list(capability_type=type)}
+
+
+@app.post("/registry/register")
+async def registry_register(request: Request):
+    """Провайдер публікує можливість: {id, capability_type, provider_url, price, min_reputation_tier, active}."""
+    if capability_registry is None:
+        return JSONResponse(status_code=503, content={"error": "Реєстр ще не ініціалізований."})
+    raw_body = await request.body()
+    if len(raw_body) > _MAX_BODY_FIELD_LEN:
+        return JSONResponse(status_code=400, content={"error": "Тіло запиту завелике."})
+    try:
+        record = json.loads(raw_body)
+        normalized = capability_registry.register(record)
+    except (ValueError, TypeError) as exc:
+        return JSONResponse(status_code=400, content={"error": f"Некоректний запис можливості: {exc}"})
+    except Exception:  # noqa: BLE001 — недовірений вхід; ніколи не 500
+        return JSONResponse(status_code=400, content={"error": "Не вдалося зареєструвати можливість."})
+    return {"registered": normalized}
 
 
 @app.get("/photos")
@@ -208,5 +258,5 @@ async def pay_for_photo(name: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    facilitator = WhitechainFacilitator()  # fail fast тут, якщо RPC/chain не той
+    init_facilitator(WhitechainFacilitator())  # fail fast тут, якщо RPC/chain не той
     uvicorn.run(app, host=config.SERVICE_PROVIDER_HOST, port=config.SERVICE_PROVIDER_PORT)
