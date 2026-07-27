@@ -2,13 +2,21 @@
 
 > **Status: proof-of-concept / MVP.** This is **not** a production payment
 > network. No escrow, no dispute resolution, no mainnet settlement yet — see
-> [Roadmap](#roadmap-out-of-scope-for-this-poc) for what's deliberately not
-> here. Phase 1's new payment core (tEURC/EIP-3009 + the KYA/reputation gate)
-> has been verified end-to-end locally (`scripts/demo.py`, Solidity + pytest
-> suites) but **not yet run against real Whitechain testnet** — see
-> [Step 0](#step-0-network--wb-soul-recon) for why, and
+> [Out of scope](#out-of-scope-phase-3) for what's deliberately not here.
+> The payment core (tEURC/EIP-3009 + the KYA/reputation gate + the modular
+> facilitator) has been verified end-to-end locally (`scripts/demo.py`,
+> Solidity + pytest suites) but **not yet run against real Whitechain
+> testnet** — see [Step 0](#step-0-network--wb-soul-recon) for why, and
 > [`DEPLOY_WHITECHAIN.md`](DEPLOY_WHITECHAIN.md) for how to do that deploy
 > yourself.
+
+**AgentPay is a trust layer for the AI-agent economy; payments are one
+service.** The hard part of agents transacting autonomously isn't moving a
+stablecoin — that's a solved, copy-pasteable primitive. The hard part is
+*trust*: knowing the counterparty is a verified, accountable agent with a
+track record, and enforcing policy on that before any money moves. This PoC
+implements that trust layer — identity, reputation, and policy gating a
+payment — and payment is just the first service wired behind it.
 
 **KYA-native payments — WB Soul identity + SBT reputation — on a
 MiCA-aligned chain. The one thing that cannot be copy-pasted to Base or
@@ -96,6 +104,76 @@ The facilitator receives the full payment, keeps a configurable fee
 Service Provider in a second transfer — the simpler of two documented
 designs (see [Trade-offs](#trade-offs-worth-knowing-about)), not an atomic
 router-contract split.
+
+The facilitator itself is **not** a god object: it's decomposed into
+single-responsibility modules (`facilitator/identity.py`, `reputation.py`,
+`policy.py`, `payment.py`, `settlement.py`, `capability.py`, `events.py`,
+`store.py`), and `whitechain_facilitator.py` is a thin orchestrator that
+just sequences them `identity → policy → payment → settlement → event →
+response`. The agent finds the service through a **Capability Registry**
+(`GET /registry/capabilities?type=…`) rather than a hardcoded URL, and the
+resource is released on **SettlementConfirmed** (after the relay's receipt),
+not on broadcast — closing the off-chain race where content could be handed
+out before the payment actually landed (`WAIT_FOR_CONFIRMATION`, default
+true; `false` is a fast local-demo path with the obvious trade-off).
+
+## North-star architecture (vision)
+
+The layers below are the **target architecture**, not all built today. This
+PoC implements the shaded core (Identity, Capability, Policy, Payment,
+Settlement, Reputation, one Provider) as an in-process modular monolith on
+Whitechain. Everything else is directional — see
+[Out of scope](#out-of-scope-phase-3).
+
+```
+                          target architecture (vision)
+┌─────────────────────────────────────────────────────────────────────┐
+│  Agent SDK            client libs: sign auth, discover, pay           │   (partial: agent_client.py)
+├─────────────────────────────────────────────────────────────────────┤
+│  Identity      ✔  WB Soul: KYA (soulOf + IsVerified)                  │   ← built
+│  Capability    ✔  service discovery registry (by capability_type)    │   ← built
+│  Policy        ✔  allow/deny: verified + reputation tier + limits    │   ← built
+│  Payment       ✔  off-chain EIP-3009/EIP-712 validation              │   ← built
+│  Settlement    ✔  relay + fee; confirmed before access (seam for     │   ← built
+│                   Phase 2.5 atomic router / escrow)                   │
+│  Reputation    ✔  behavioral score/tier + SBT anchor                 │   ← built
+│  Providers     ◐  one AI Service Provider (photos); adapters later   │   ← 1 built
+├─────────────────────────────────────────────────────────────────────┤
+│  Whitechain    ✔  tEURC (EIP-3009), WB Soul, gas in WBT              │   ← built (local; testnet-ready)
+└─────────────────────────────────────────────────────────────────────┘
+   ✔ = implemented in this PoC   ◐ = single instance   (rest = roadmap)
+```
+
+## Reputation formula
+
+So there's no "how is the score computed?" hand-waving, the exact off-chain
+formula (`facilitator/reputation.py`, unit-tested in
+`tests/test_reputation.py`):
+
+```
+score (0..100) =
+      30 · completed_norm      # min(completed_payments / N_target, 1),  N_target = 20
+    + 25 · (1 − dispute_ratio)
+    + 20 · (1 − refund_ratio)
+    + 15 · tenure_norm         # min(days_active / 365, 1)
+    + 10 · sbt_bonus           # 1.0 if the agent holds a trust SBT, else 0
+    − 25 · fraud_flags         # fraud penalty
+score is clamped to [0, 100].
+
+tier:  0..39 → tier 0     40..69 → tier 1     70..100 → tier 2
+```
+
+Behavioral counters (`completed_payments`, `disputes`, `refunds`,
+`first_seen`, `fraud_flags`) live in a local SQLite `agent_stats` table and
+are updated on settlement events. A **cold-start guard** in `identity.py`
+matters: the formula gives a brand-new agent with no history 45 points
+(because `1 − 0 = 1` on the dispute/refund terms), so for an agent with **no
+recorded activity** we ignore the formula and use only its on-chain
+SBT-attested tier — an SBT is minted precisely when an agent crosses a tier
+threshold, so a held SBT attests a previously-reached tier. Effective tier =
+`max(SBT-attested tier, behavioral tier)`. When an agent crosses a threshold,
+the facilitator logs `"SBT tier N would be minted"` (actually minted via
+`MockSoulRegistry.issueSBT` in the demo; real WB Soul minting is a TODO).
 
 ## Step 0: network & WB Soul recon
 
@@ -210,14 +288,23 @@ agentpay-whitechain/
 │
 ├── chain.py                           # deploy/connect to contracts from Python via Hardhat artifacts
 ├── config.py                          # NETWORK, USE_MOCK_SOUL, addresses, prices — all from .env
-├── facilitator/whitechain_facilitator.py  # KYA gate + reputation + EIP-3009 relay + fee
-├── agent_client.py                    # builds + signs EIP-3009 authorizations
+├── facilitator/                       # decomposed facilitator (Phase 2)
+│   ├── whitechain_facilitator.py      #   thin orchestrator: identity→policy→payment→settlement→event
+│   ├── identity.py                    #   the only reader of WB Soul (+ reputation aggregation)
+│   ├── reputation.py                  #   the explicit score/tier formula
+│   ├── policy.py                      #   allow/deny from identity + resource reqs
+│   ├── payment.py                     #   off-chain EIP-3009/EIP-712 validation
+│   ├── settlement.py                  #   relay + fee; seam for a Phase 2.5 router
+│   ├── capability.py                  #   capability registry / service discovery
+│   ├── events.py                      #   payment-flow event journal
+│   └── store.py                       #   SQLite: agent_stats / events / capabilities
+├── agent_client.py                    # builds + signs EIP-3009 auth; discovers providers via registry
 ├── author/agent.py                    # Claude tool-use agent (the buyer)
-├── service_provider/server.py         # FastAPI seller (formerly "photobank")
+├── service_provider/server.py         # FastAPI seller + registry endpoints (formerly "photobank")
 ├── wallets/setup_wallets.py           # native WBT (gas) wallet utilities
 │
-├── scripts/demo.py                    # end-to-end KYA/reputation showcase
-├── tests/                             # pytest: facilitator KYA/reputation/anti-replay
+├── scripts/demo.py                    # end-to-end discovery + KYA + reputation showcase
+├── tests/                             # pytest: facilitator + reputation/policy/capability/identity/events
 │
 ├── SECURITY_REVIEW.md                 # Phase 0 audit (scope note: predates this architecture)
 └── DEPLOY_WHITECHAIN.md               # runbook for a real Whitechain testnet deploy
@@ -242,16 +329,23 @@ agentpay-whitechain/
   full payment at its own address, then forwards price-minus-fee to the
   service provider in a second transaction. Simpler than an atomic router
   contract, but it means the facilitator briefly custodies buyer funds.
-- **Content is issued before the relay is confirmed.** `verify_and_settle`
-  broadcasts `transferWithAuthorization` but does not wait for a mined
-  receipt before the service provider hands over the resource — the whole
-  point of not blocking the request cycle on block time. If the relay
-  later fails (e.g. the facilitator runs out of gas), the resource was
-  already given away unpaid. Acceptable for a PoC; a production version
-  needs either a wait-for-confirmation path or a reconciliation/retry
-  mechanism for failed relays.
-- **Reputation tiers are a placeholder heuristic** (0 SBTs = tier 0, 1 = tier
-  1, 2+ = tier 2), not a designed reputation system.
+- **Confirmation vs. latency.** By default (`WAIT_FOR_CONFIRMATION=true`)
+  the resource is released only after the relay's receipt is mined
+  (SettlementConfirmed), which closes the off-chain race where content
+  could be handed out before the payment landed — at the cost of blocking
+  the request on block time. Setting it `false` restores the fast
+  broadcast-only path (release on submit) for local demos, and reintroduces
+  that race; a production system on the fast path would need a
+  reconciliation/retry mechanism for relays that later fail.
+- **Reputation is a first-pass model**, not a hardened one. The formula is
+  explicit and unit-tested (see [above](#reputation-formula)), but its
+  behavioral inputs come from a local, single-node SQLite table that this
+  same process writes — so it's trust-on-first-use and sybil-able (spin up
+  new souls, self-deal to inflate `completed_payments`). A production
+  version needs cross-node/on-chain provenance for the counters and
+  sybil resistance. The formula also over-rewards absence of history (a
+  brand-new agent scores 45); we guard that at cold start (see the formula
+  section) but it's a real limitation of the model.
 
 ## Security Notes
 
@@ -271,20 +365,31 @@ This is a testnet prototype, not production-hardened financial software.
   equivalent dedicated review yet. Treat that as an open item, not a gap
   that's been checked and found fine.
 
-## Roadmap (out of scope for this PoC)
+## Out of scope (Phase 3+)
 
-Deliberately not built here, to keep this PoC's scope honest:
+Deliberately **not** built here, to keep scope honest. These were
+consciously left as roadmap, not overlooked:
 
-- **Escrow / dispute resolution** — today, once a payment settles, it's
-  final; there's no mechanism to hold funds pending delivery confirmation
-  or to arbitrate a disagreement.
-- **Capability marketplace** — agents currently know which specific service
-  to call; there's no discovery/listing layer for "which agents sell what."
-- **Payment channels / batching / scaling** — every purchase is its own
-  on-chain settlement; no channel or batching layer to amortize gas across
-  many small payments.
-- **Streaming payments** — payment is all-or-nothing per resource, not
-  metered/continuous.
+- **Microservices** — the whole system is one process (a modular monolith).
+  Splitting identity / policy / settlement / registry into separately
+  deployed services is a scaling decision for later, not a PoC concern.
+- **Event bus / message queue** — events are a structured log + a SQLite
+  `events` table, not Kafka/RabbitMQ/streams. A real bus (for fan-out,
+  replay, async consumers) is Phase 3.
+- **Provider adapters** — one AI Service Provider (photos). Pluggable
+  adapters for real providers (OpenAI / Claude / Gemini / …) behind the
+  capability layer are premature until there's more than one provider.
+- **On-chain capability registry** — discovery is a local SQLite table today;
+  a decentralized, on-chain registry (so discovery doesn't trust one node)
+  is future work.
+- **Escrow / atomic router contract (Phase 2.5)** — settlement is
+  receive-full-then-forward with the facilitator briefly custodying funds;
+  `settlement.py` keeps a clean seam so an atomic router/escrow contract can
+  replace it without touching callers. That contract itself is a separate
+  phase.
+- **Payment channels / batching / streaming** — every purchase is its own
+  on-chain settlement; no channels/batching to amortize gas, and payment is
+  all-or-nothing per resource rather than metered/continuous.
 
 ## Contact
 
