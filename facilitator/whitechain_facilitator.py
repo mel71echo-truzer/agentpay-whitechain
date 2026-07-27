@@ -38,7 +38,7 @@ from facilitator import reputation as reputation_mod  # noqa: E402
 from facilitator.events import EventLog  # noqa: E402
 from facilitator.identity import IdentityReader  # noqa: E402
 from facilitator.payment import PaymentValidator  # noqa: E402
-from facilitator.settlement import SettlementEngine, SettlementError  # noqa: E402
+from facilitator.settlement import SettlementEngine, SettlementError, SettlementForwardError  # noqa: E402
 from facilitator.store import Store  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -145,10 +145,30 @@ class WhitechainFacilitator:
         emit(events_mod.AUTHORIZATION_VALIDATED)
 
         # 4. Settlement (релей + форвард комісії).
+        # Журнал ПЕРЕД бродкастом (рішення №3): фіксуємо намір рушити кошти
+        # ДО будь-якої транзакції, щоб «завислий» розрахунок був відновлюваний.
+        emit(events_mod.SETTLEMENT_INITIATED)
         try:
             result = self.settlement.settle(validation["message"], authorization)
+        except SettlementForwardError as exc:
+            # ЧАСТКОВИЙ збій: релей пройшов (кошти у facilitator), форвард — ні.
+            # Явний, придатний для звірки стан «кошти утримані, зобов'язання
+            # не виконане». БЕЗ авто-ретраю (рішення №3): tx_hash релею
+            # журналюється для ручної/окремої реконсиляції. Доступ НЕ видаємо.
+            logger.error(
+                "Частковий збій сеттлменту: кошти утримані relay=%s net_wei=%s: %s",
+                exc.relay_tx_hash, exc.net_wei, exc,
+            )
+            emit(events_mod.SETTLEMENT_FUNDS_HELD, tx_hash=exc.relay_tx_hash)
+            return self._deny(
+                "Кошти утримані, зобов'язання не виконане (форвард сервісу "
+                "відкотився). Розрахунок зафіксовано для звірки.",
+                agent_identity, emitted,
+            )
         except SettlementError as exc:
-            logger.warning("Settlement провалився: %s", exc)
+            # Чистий збій: релей не пройшов, кошти не рухалися.
+            logger.warning("Settlement провалився (кошти не рухалися): %s", exc)
+            emit(events_mod.SETTLEMENT_FAILED)
             return self._deny(f"Розрахунок не вдався: {exc}", agent_identity, emitted)
         emit(events_mod.SETTLEMENT_SUBMITTED, tx_hash=result["relay_tx_hash"])
         if result["confirmed"]:
@@ -176,6 +196,13 @@ class WhitechainFacilitator:
             "settlement_status": result["status"],
             "events": emitted,
         }
+
+    def list_held_settlements(self, limit: int = 100) -> list[dict]:
+        """Звірка (рішення №3): розрахунки з утриманими коштами (релей пройшов,
+        форвард відкотився). Кожен запис несе tx_hash релею → операційна
+        команда може простежити суму on-chain і провести форвард вручну.
+        БЕЗ авто-ретраю — це навмисно окреме рішення, не сайд-ефект."""
+        return self.store.list_events(event_type=events_mod.SETTLEMENT_FUNDS_HELD, limit=limit)
 
     def _deny(self, reason: str, agent_identity: dict, emitted: list[dict]) -> dict:
         return {

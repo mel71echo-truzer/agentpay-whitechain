@@ -171,16 +171,24 @@ class Store:
             event_id = cur.lastrowid
         return {"id": event_id, "ts": ts, "agent": agent, "resource": resource, "event_type": event_type, "tx_hash": tx_hash}
 
-    def list_events(self, *, agent: str | None = None, limit: int = 100) -> list[dict]:
+    def list_events(
+        self, *, agent: str | None = None, event_type: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        # Параметризовані умови (без конкатенації значень у SQL).
+        conditions, params = [], []
+        if agent:
+            conditions.append("agent = ?")
+            params.append(agent)
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        query = "SELECT * FROM events"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         with self._lock:
-            if agent:
-                rows = self._conn.execute(
-                    "SELECT * FROM events WHERE agent = ? ORDER BY id DESC LIMIT ?", (agent, limit)
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
+            rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     # -------------------- capabilities --------------------

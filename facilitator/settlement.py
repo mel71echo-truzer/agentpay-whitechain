@@ -31,7 +31,30 @@ logger = logging.getLogger(__name__)
 
 
 class SettlementError(Exception):
-    """Релей провалився on-chain (revert / RPC-помилка)."""
+    """Базовий: розрахунок не вдався on-chain (revert / RPC-помилка)."""
+
+
+class SettlementRelayError(SettlementError):
+    """Релей `transferWithAuthorization` відкотився — кошти НЕ рухалися.
+
+    Чистий збій: платника не списано (авторизаційний nonce не спожито
+    успішно), форвард навіть не пробувався. Компенсація не потрібна.
+    """
+
+
+class SettlementForwardError(SettlementError):
+    """Релей пройшов (кошти вже у facilitator), але форвард сервісу відкотився.
+
+    Це ЧАСТКОВИЙ збій: платника списано, нетто сервісу НЕ переслано → кошти
+    утримані у facilitator, зобов'язання не виконане. Несе `relay_tx_hash`
+    (для звірки on-chain) і `net_wei` (скільки винні сервісу). Ретрай форварду
+    свідомо НЕ автоматичний (рішення №3) — це окреме операційне рішення.
+    """
+
+    def __init__(self, message: str, *, relay_tx_hash, net_wei: int):
+        super().__init__(message)
+        self.relay_tx_hash = relay_tx_hash
+        self.net_wei = net_wei
 
 
 class SettlementEngine:
@@ -89,7 +112,8 @@ class SettlementEngine:
         if self.wait_for_confirmation:
             receipt = self.w3.eth.wait_for_transaction_receipt(relay_tx_hash, timeout=self.confirmation_timeout)
             if receipt.status != 1:
-                raise SettlementError(f"Релей транзакції {relay_tx_hash} відкотився (status != 1).")
+                # Релей відкотився: кошти не рухалися, форвард не пробуємо.
+                raise SettlementRelayError(f"Релей транзакції {relay_tx_hash} відкотився (status != 1).")
             confirmed = True
 
         fee_wei = (value * self.fee_bps) // 10_000
@@ -109,7 +133,14 @@ class SettlementEngine:
                     forward_tx_hash, timeout=self.confirmation_timeout
                 )
                 if fwd_receipt.status != 1:
-                    raise SettlementError(f"Форвард комісії {forward_tx_hash} відкотився (status != 1).")
+                    # Релей уже пройшов (кошти у facilitator), форвард — ні:
+                    # частковий збій. Несемо relay_tx_hash+net_wei для звірки.
+                    raise SettlementForwardError(
+                        f"Форвард нетто {forward_tx_hash} відкотився (status != 1); "
+                        f"релей {relay_tx_hash} пройшов — кошти утримані.",
+                        relay_tx_hash=relay_tx_hash,
+                        net_wei=net_wei,
+                    )
 
         return {
             "relay_tx_hash": relay_tx_hash,
