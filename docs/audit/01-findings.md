@@ -15,12 +15,14 @@
 
 | # | Модуль | Severity | Стан | Коміт | Тест (fail→pass) |
 |---|---|---|---|---|---|
-| F1 | config/payment/agent_client | MAJOR | **потребує рішення (wire)** — див. 02-open-questions #B | — | `test_price_scaling_audit.py` (діагностика) |
-| F2 | store.py | MAJOR | **виправлено** | `51e4b17` | `test_store_single_process.py` ✓ |
-| F3 | settlement.py | MAJOR | заплановано (M2) | — | (буде) `test_settlement_partial_failure` |
-| F4 | server `/registry/register` + capability.resolve | **CRITICAL** | **стоп: зміна публічного API** — див. 02-open-questions #A | — | (буде) після узгодження |
-| F5 | agent_client `SpendLedger` / server `_ledger` (float) | MAJOR | входить у F1 (money-type) | — | (буде) з money-type |
-| F6 | payment.py overpayment `value > price` | MAJOR | заплановано (M3) | — | (буде) `test_payment_overpayment` |
+| F1 | config/payment/agent_client (float→wei) | MAJOR | **виправлено** (wire = B3) | `09b3a4c` | `test_money_scaling.py` ✓ |
+| F2 | store.py (single-process) | MAJOR | **виправлено** | `51e4b17` | `test_store_single_process.py` ✓ |
+| F3 | settlement.py (partial failure) | MAJOR | **виправлено** | `1530c73` | `test_settlement_partial_failure.py` ✓ |
+| F4 | server `/registry/register` + capability.resolve | **CRITICAL** | **СТОП: зміна публічного API** — див. 02-open-questions #A | — | після узгодження |
+| F5 | agent_client `SpendLedger` / server `_ledger` (float) | MAJOR | **виправлено** (у складі F1) | `09b3a4c` | `test_money_scaling.py` ✓ |
+| F6 | payment.py overpayment `value > price` | MAJOR | **виправлено** | `1ec1e9e` | `test_payment_overpayment.py` ✓ |
+| F7 | agent_stats sybil (self-dealing накручує completed) | MAJOR? | **report-only, потребує підтвердження автора** (модель загроз) | — | — |
+| F8 | identity `reputation_score` cold-start proxy | MINOR | report-only | — | — |
 
 ---
 
@@ -120,10 +122,90 @@ resolve). Мінімальний дизайн — у `02-open-questions.md #A`. 
 
 ---
 
-## Наступні кроки (після цього коміту)
+## F7 — Sybil/self-dealing репутації (MAJOR?, report-only — потребує підтвердження автора)
 
-1. **Стоп-пойнт:** узгодити `02-open-questions.md` #A (реєстр) і #B (wire-формат
-   грошей) — обидва змінюють публічний API/схему.
-2. Далі M2 (settlement journal, F3) — не змінює публічну схему, роблю без стопу.
-3. Після узгодження #B — money-type міграція (F1/F5), рано, як просив автор.
-4. M3 payment (F6 + типізація входу), потім identity/reputation + фінальний звіт.
+`agent_stats.completed_payments` інкрементується локально на кожному успішному
+розрахунку (`whitechain_facilitator._record_completed_payment`). Агент, що
+контролює і платника, і сервіс, може ганяти платежі сам собі й накручувати
+`completed` → піднімати behavioral tier (F-формула, 30·completed_norm). KYA-гейт
+(WB Soul) частково стримує (потрібен верифікований Soul), а SBT-attested tier —
+он-чейн і не накручується локально; але поведінкова складова — так.
+
+**Чому не патчу:** це рішення моделі загроз, а не однозначний баг. Варіанти
+(anti-sybil: враховувати лише платежі до РІЗНИХ контрагентів; вимога стейку;
+он-чейн-джерело статистики) — це зміна дизайну репутації, яку автор має
+підтвердити. За правилами — **report-only**. Джерело: `whitechain_facilitator.py`
+`_record_completed_payment`, `reputation.py`.
+
+## F8 — cold-start `reputation_score` як проксі (MINOR, report-only)
+
+`identity.py:91` для агента без історії ставить `score = attested_tier * 35`
+(0/35/70) — грубий проксі ЛИШЕ для показу. Гейт цим не керується (гейт — на
+`reputation_tier = max(attested, behavioral)`), і код це коментує. Розходження
+score↔формула суто косметичне. Не патчу (MINOR + report-only).
+
+## Огляд identity.py / reputation.py (модулі 4–5, пріоритет «решта»)
+
+Обидва — чисті, single-responsibility, добре покриті (identity 97%,
+reputation 100%). `reputation.py` використовує float, АЛЕ це 0..100 евристичний
+**score**, не гроші — заборона «float для грошей» не застосовна. KYA/SBT
+читаються он-чейн через єдиний seam (`IdentityReader`), підписи не перевіряються
+свідомо (це робота `payment.py`). CRITICAL/MAJOR не знайдено; єдині зауваги —
+F7 (sybil, крос-модульне) і F8 (косметика). Патчів у ці модулі не вносив.
+
+---
+
+## Самоперевірка (обов'язкові зони покриття)
+
+| Зона | Тест | Стан |
+|---|---|---|
+| (A3) Часткові збої розрахунку | `test_settlement_partial_failure.py` (relay ok/forward revert → FundsHeld, звірка) | ✓ |
+| (A4) Ідемпотентність / replay | `test_facilitator.py::test_nonce_replay_rejected` (on-chain nonce) | ✓ |
+| (A5) Межові суми | `test_money_scaling.py` (0, суб-wei reject, точна межа ledger), `test_payment_overpayment.py` (від'ємна, under/over/exact) | ✓ |
+| (B) Конкурентність | `test_store_concurrency.py` (8×200 інкрементів без втрат), `test_store_single_process.py` (мультипроцес заборонено) | ✓ |
+
+Тести детерміновані: без мережі (крім локального eth-tester), без `sleep`, без
+залежності від системного часу в асертах (час монотонно перевіряється лише через
+явні validAfter/validBefore).
+
+---
+
+## Підсумковий вердикт
+
+**Виправлено в цьому проході (кожне — окремий коміт + тест fail→pass):**
+
+| # | Severity | Суть | Коміт |
+|---|---|---|---|
+| F1/F5 | MAJOR | float у грошових шляхах → int wei всюди (config/payment/ledger/wire B3) | `09b3a4c` |
+| F2 | MAJOR | «один процес» форсовано файловим локом | `51e4b17` |
+| F3 | MAJOR | частковий збій сеттлменту → журнал + стан «кошти утримані» + звірка | `1530c73` |
+| F6 | MAJOR | overpayment відхиляється; типізація входу авторизації | `1ec1e9e` |
+
+**Свідомо НЕ патчено (стоп/репорт):**
+- **F4 (CRITICAL)** — реєстр без авторизації + керований вибір провайдера.
+  Виправлення змінює публічний API → показано в `02-open-questions.md #A`,
+  **чекає рішення автора** (підписана реєстрація + прив'язка payTo).
+- **F7 (MAJOR?)** — sybil репутації. Рішення моделі загроз, report-only.
+- **F8 (MINOR)** — косметичний score-проксі, report-only.
+
+**Покриття грошових/безпекових модулів після проходу:** payment 98%,
+settlement 100%, store 100% (раніше 85/94/94; непокриті були саме гілки збоїв і
+гейтів). Повний набір: **83 passed**. Solidity-контракти в цьому проході не
+чіпалися.
+
+**Топ-5 за важливістю (що лишилося зробити):**
+1. **F4 реєстр (CRITICAL)** — узгодити й реалізувати #A; це єдиний відкритий
+   шлях перенаправлення коштів.
+2. **F7 sybil** — визначити модель загроз для behavioral-репутації.
+3. Реконсилятор утриманих коштів (F3 дає стан + звірку; авто-повернення —
+   окреме рішення, свідомо не робив).
+4. Пін залежностей (lock-файл) — зараз лише `>=`, відтворюваність не гарантована.
+5. Прибрати мертвий код (`author/agent.py`, `send_wbt`, deps redis/pillow) або
+   свідомо лишити з поміткою.
+
+---
+
+## Наступний стоп-пойнт
+
+Єдине, що блокує подальший рух — **F4 (#A реєстр)**: це зміна публічного API,
+тож за правилами показано дизайн і чекаю «ок» перед реалізацією.
