@@ -25,13 +25,14 @@
 """
 
 import base64
+import hmac
 import json
 import logging
 import re
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -164,12 +165,29 @@ async def registry_register(request: Request):
     return {"registered": normalized}
 
 
+def _admin_auth_error(authorization: str | None) -> JSONResponse | None:
+    """Контроль доступу до /admin/*. Повертає JSONResponse-помилку або None (ок).
+
+    ПОРОЖНІЙ ADMIN_API_TOKEN => /admin ВИМКНЕНО (403), а не відкрито — безпечний
+    дефолт. Заданий => потрібен `Authorization: Bearer <token>`; звіряємо у
+    сталий час (hmac.compare_digest). Значення токена не логуємо."""
+    if not config.ADMIN_API_TOKEN:
+        return JSONResponse(status_code=403, content={"error": "Адмін-ендпойнти вимкнені (ADMIN_API_TOKEN не заданий)."})
+    expected = f"Bearer {config.ADMIN_API_TOKEN}"
+    if not authorization or not hmac.compare_digest(authorization, expected):
+        return JSONResponse(status_code=401, content={"error": "Потрібен дійсний Authorization: Bearer токен."})
+    return None
+
+
 @app.get("/admin/held-settlements")
-def held_settlements():
+def held_settlements(authorization: str | None = Header(default=None)):
     """Звірка (F3, рішення №3): розрахунки з утриманими коштами (релей пройшов,
     форвард відкотився) — кожен несе tx_hash релею для ручного форварду. Read-only,
-    операторський (сервер за замовчуванням слухає лише 127.0.0.1). Порожньо =
-    немає незавершених зобов'язань."""
+    ОПЕРАТОРСЬКИЙ: під токеном (/admin/*), вимкнений якщо ADMIN_API_TOKEN не заданий.
+    Порожньо = немає незавершених зобов'язань."""
+    auth_error = _admin_auth_error(authorization)
+    if auth_error is not None:
+        return auth_error
     if facilitator is None:
         return JSONResponse(status_code=503, content={"error": "Facilitator не ініціалізований."})
     held = facilitator.list_held_settlements()
@@ -193,15 +211,20 @@ def list_photos():
 
 
 @app.get("/balance")
-def balance():
-    """Скільки AI Service Provider заробив (нетто, після комісії facilitator-а)."""
-    return {
+def balance(authorization: str | None = Header(default=None)):
+    """Заробіток AI Service Provider (нетто). ПУБЛІЧНО — лише агрегат (сума +
+    кількість продажів, це вітрина доходу). Детальний список `sales` містить
+    адреси покупців і tx-хеші — його віддаємо ЛИШЕ під адмін-токеном (той самий
+    контроль, що й /admin/*), щоб не зливати покупця↔покупку публічно."""
+    result = {
         "address": config.SERVICE_PROVIDER_WALLET_ADDRESS,
         "earned_wei": _ledger["earned_wei"],
         "earned_teurc": money.wei_to_teurc_str(_ledger["earned_wei"], config.TEURC_DECIMALS),
         "sales_count": len(_ledger["sales"]),
-        "sales": _ledger["sales"],
     }
+    if _admin_auth_error(authorization) is None:  # адмін -> додаємо деталізацію
+        result["sales"] = _ledger["sales"]
+    return result
 
 
 @app.get("/photo/{name}")

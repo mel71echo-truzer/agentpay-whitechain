@@ -78,14 +78,37 @@ def verify_capability_record(record: dict) -> str:
     return registry_auth.verify_registration(record, record.get("signature", ""))
 
 
+# НАЗВАНИЙ критерій вибору провайдера, коли їх кілька (F4). Прототипний дефолт —
+# FIRST_REGISTERED: перший у СЕРВЕРНОМУ порядку реєстрації (created_at/rowid у
+# store, не контрольований реєстрантом). Це свідомий вибір прототипу, НЕ
+# ранжування за репутацією. Продакшн має передавати prefer_owner (allowlist
+# довірених owner-адрес) АБО ранжувати за on-chain-репутацією власника — тоді
+# критерій стане ALLOWLIST/REPUTATION відповідно. Головне: серед КІЛЬКОХ
+# провайдерів вибір ніколи не має бути «сліпий [0]» без названого правила.
+SELECTION_FIRST_REGISTERED = "first-registered"
+SELECTION_ALLOWLIST = "allowlist-owner"
+
+
+def select_provider(verified_candidates: list[dict], *, prefer_owner: str | None = None) -> tuple[dict, str]:
+    """Обирає одного провайдера зі списку ПЕРЕВІРЕНИХ кандидатів за НАЗВАНИМ
+    критерієм. Повертає (запис, назва_критерію) — критерій явний і придатний
+    для логування/аудиту, а не побічний ефект індексації."""
+    if prefer_owner is not None:
+        for c in verified_candidates:
+            if str(c.get("id", "")).lower() == prefer_owner.lower():
+                return c, SELECTION_ALLOWLIST
+        raise CapabilityNotFound(f"Немає перевіреного провайдера з owner={prefer_owner}.")
+    # Прототипний дефолт: перший зареєстрований (серверний порядок).
+    return verified_candidates[0], SELECTION_FIRST_REGISTERED
+
+
 def resolve_capability(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> dict:
     """Резолвить ПЕРЕВІРЕНИЙ запис можливості через реєстр.
 
-    Reєстр повертає всі збіги в серверному порядку (не контрольованому
-    реєстрантом). Агент відкидає записи з невалідним підписом, а вибір робить
-    ЯВНО: якщо задано prefer_owner (напр. allowlist довірених провайдерів) —
-    бере саме його; інакше — перший перевірений. Це не «сліпий matches[0]»:
-    невалідні відсіяно, а критерій вибору — рішення викликача."""
+    Реєстр повертає ВСІ збіги в серверному порядку. Агент (а) відкидає записи з
+    невалідним підписом, (б) обирає одного за НАЗВАНИМ критерієм (`select_provider`),
+    а не сліпим matches[0]. Обраний критерій кладемо у запис (`_selected_by`) для
+    прозорості."""
     caps = discover_capabilities(registry_url, capability_type)
     verified = []
     for c in caps:
@@ -96,12 +119,9 @@ def resolve_capability(registry_url: str, capability_type: str, *, prefer_owner:
         verified.append(c)
     if not verified:
         raise CapabilityNotFound(f"Реєстр не має ПЕРЕВІРЕНОГО провайдера типу '{capability_type}'.")
-    if prefer_owner is not None:
-        for c in verified:
-            if str(c.get("id", "")).lower() == prefer_owner.lower():
-                return c
-        raise CapabilityNotFound(f"Немає перевіреного провайдера з owner={prefer_owner}.")
-    return verified[0]
+    chosen, criterion = select_provider(verified, prefer_owner=prefer_owner)
+    chosen = {**chosen, "_selected_by": criterion}
+    return chosen
 
 
 def resolve_provider_url(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> str:

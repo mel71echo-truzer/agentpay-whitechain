@@ -108,6 +108,7 @@ def setup_local_chain() -> str:
     config.FACILITATOR_WALLET_PRIVATE_KEY = facilitator_acct.key.hex()
     config.SERVICE_PROVIDER_WALLET_ADDRESS = service_provider_acct.address
     config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY = service_provider_acct.key.hex()  # для підпису запису реєстру (F4 #A)
+    config.ADMIN_API_TOKEN = "demo-admin-token"  # /admin/* під токеном (не відкрито)
     config.CHAIN_ID = w3.eth.chain_id
     config.SERVICE_PROVIDER_BASE_URL = f"http://{config.SERVICE_PROVIDER_HOST}:{config.SERVICE_PROVIDER_PORT}"
 
@@ -255,7 +256,8 @@ def main() -> None:
     _ok(f"агент знайшов сервіс через реєстр (не хардкод): type='{config.CAPABILITY_TYPE}' -> {provider_url}")
     console.print(
         f"  Активних можливостей у реєстрі: {len(caps)}; підпис перевірено, "
-        f"owner={cap['owner_address'][:10]}…, pay_to закріплено={expected_pay_to[:10]}…"
+        f"owner={cap['owner_address'][:10]}…, pay_to закріплено={expected_pay_to[:10]}…, "
+        f"критерій вибору='{cap['_selected_by']}'"
     )
 
     console.print("\n[bold]Крок 6 — агент БЕЗ Soul намагається купити фото[/bold]")
@@ -346,8 +348,12 @@ def main() -> None:
     table.add_row("Видача ресурсу", "на SettlementConfirmed" if config.WAIT_FOR_CONFIRMATION else "на broadcast")
     if latency is not None:
         table.add_row("Latency PaymentRequested→AccessGranted", f"{latency*1000:.0f} ms")
-    # Звірка утриманих коштів (F3) — видимо оператору через /admin/held-settlements.
-    held = requests.get(f"{provider_url}/admin/held-settlements", timeout=10).json()
+    # Звірка утриманих коштів (F3) — операторський ендпойнт під токеном.
+    held = requests.get(
+        f"{provider_url}/admin/held-settlements",
+        headers={"Authorization": f"Bearer {config.ADMIN_API_TOKEN}"},
+        timeout=10,
+    ).json()
     table.add_row("Утримано розрахунків (звірка F3)", str(held["held_count"]))
     console.print(table)
 

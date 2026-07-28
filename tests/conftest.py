@@ -77,6 +77,7 @@ def facilitator_setup(tmp_path):
     config.FACILITATOR_WALLET_ADDRESS = facilitator_acct.address
     config.FACILITATOR_WALLET_PRIVATE_KEY = facilitator_acct.key.hex()
     config.SERVICE_PROVIDER_WALLET_ADDRESS = service_provider_acct.address
+    config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY = service_provider_acct.key.hex()
     config.CHAIN_ID = w3.eth.chain_id
     config.FACILITATOR_FEE_BPS = 50
     config.SPEND_LEDGER_PATH = str(tmp_path / "spend_ledger.json")

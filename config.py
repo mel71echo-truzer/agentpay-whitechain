@@ -91,6 +91,11 @@ SERVICE_PROVIDER_HOST = os.getenv("SERVICE_PROVIDER_HOST", "127.0.0.1")
 SERVICE_PROVIDER_PORT = _int_env("SERVICE_PROVIDER_PORT", 8000)
 SERVICE_PROVIDER_BASE_URL = f"http://{SERVICE_PROVIDER_HOST}:{SERVICE_PROVIDER_PORT}"
 
+# Операторський токен для /admin/* (звірка утриманих коштів тощо). ПОРОЖНІЙ за
+# замовчуванням = /admin вимкнено (403), НЕ відкрито. Заданий => потрібен
+# заголовок `Authorization: Bearer <token>`. Ніколи не логуємо саме значення.
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
+
 # Ціни зберігаємо у int wei (мінімальні одиниці tEURC). Env-значення лишаються
 # людськими (0.02), але конвертуються в wei на завантаженні (рішення №4).
 RESOURCE_PRICE_WEI = _price_wei_env("RESOURCE_PRICE_TEURC", "0.02")
