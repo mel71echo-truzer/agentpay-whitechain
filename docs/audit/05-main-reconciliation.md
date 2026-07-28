@@ -97,7 +97,7 @@ happy-path тести (зараз лише KYA-revert). Плюс задепло�
 ### Варіант A — гілка = істина для Python; router як явний roadmap-артефакт (рекомендую)
 Зробити **гілку базою** (протестована, 105 зелених, працює). Перенести з main
 `AgentPayRouter.sol` + його тест у гілку **як явно позначений roadmap, НЕ
-підключений** (коментар «Phase 2.5 target, not wired; див. 04-main-reconciliation»).
+підключений** (коментар «Phase 2.5 target, not wired; див. 05-main-reconciliation»).
 Живим лишається `SettlementEngine` (протестований off-chain relay). Долю
 `pyproject.toml`/`agentpay`-SDK вирішити окремо (не тягнути мовчки).
 - **Що ламається:** нічого в робочій системі (router не підключений).
