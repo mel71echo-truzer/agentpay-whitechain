@@ -12,11 +12,21 @@
 
 from __future__ import annotations
 
-import fcntl
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+# Файловий лок «один процес» реалізований по-різному на POSIX і Windows.
+# fcntl існує ЛИШЕ в Unix — на Windows його імпорт валить увесь застосунок,
+# тому обираємо бекенд на етапі імпорту, а не всередині функції.
+try:  # POSIX (Linux, macOS)
+    import fcntl
+
+    msvcrt = None
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 
 # Версія схеми store. Піднімай при БУДЬ-ЯКІй зміні структури таблиць, щоб старий
@@ -109,9 +119,15 @@ class Store:
         потрапляє (окрема БД на з'єднання).
         """
         lock_path = f"{db_path}.lock"
-        fd = open(lock_path, "w")  # noqa: SIM115 — тримаємо fd весь час життя Store
+        # "a+" (не "w"): на Windows усічення файлу, чиї байти залоковані іншим
+        # процесом, саме по собі впало б помилкою доступу, а не StoreLockError.
+        fd = open(lock_path, "a+")  # noqa: SIM115 — тримаємо fd весь час життя Store
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:  # Windows: лок 1 байта з позиції 0, теж ексклюзивний і неблокуючий
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
             fd.close()
             raise StoreLockError(
@@ -307,6 +323,13 @@ class Store:
         if self._flock_fd is not None:
             # Звільняємо файловий лок — легітимний рестарт того ж процесу
             # (напр. у тестах) зможе відкрити БД знову.
-            fcntl.flock(self._flock_fd.fileno(), fcntl.LOCK_UN)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self._flock_fd.fileno(), fcntl.LOCK_UN)
+                else:
+                    self._flock_fd.seek(0)
+                    msvcrt.locking(self._flock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass  # лок і так зникне при закритті дескриптора
             self._flock_fd.close()
             self._flock_fd = None
