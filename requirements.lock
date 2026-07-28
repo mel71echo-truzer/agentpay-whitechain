@@ -11,6 +11,13 @@
 # requirements.txt лишається джерелом прямих залежностей (нижні межі >=);
 # цей файл — точний знімок усього дерева на момент аудиту.
 #
+# УВАГА при регенерації: знімок робився в Linux, тож у нього легко потрапляє
+# safe-pysha3 — транзитивна залежність extra `eth-tester[py-evm]`, у якої
+# НЕМАЄ колес під Windows для жодної версії Python. Її наявність тут ламала
+# `pip install -r requirements.lock` на Windows вимогою Visual C++ Build Tools.
+# Прямі залежності від pysha3 більше немає (див. requirements-dev.txt), тож
+# рядок прибрано. Не повертай його при перегенерації lock-файлу.
+#
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.1
 aiosignal==1.4.0
@@ -70,7 +77,6 @@ regex==2026.7.10
 requests==2.33.1
 rich==15.0.0
 rlp==4.1.0
-safe-pysha3==1.0.5
 semantic-version==2.10.0
 sniffio==1.3.1
 sortedcontainers==2.4.0
