@@ -24,6 +24,65 @@
 | F7 | agent_stats sybil (self-dealing накручує completed) | MAJOR? | **свідома межа, задокументовано** → `03-reputation-threat-model.md` | — | — |
 | F8 | identity `reputation_score` cold-start proxy | MINOR | report-only | — | — |
 | F9 | store: стара схема .db падала пізно й криптично | MAJOR | **виправлено** (PRAGMA user_version guard + README) | `36ded73` | `test_store_schema_version.py` ✓ |
+| F10 | `/admin/held-settlements` відкритий (внесено мною) + `/balance` зливав адреси покупців | MAJOR | **виправлено** (токен на /admin + деталь /balance; таблиця доступу) | `6397ede` | `test_server_routes.py` ✓ |
+
+---
+
+## Пост-аудит: чотири перевірки автора (закриття)
+
+**1. Автентифікація маршрутів.** `/admin/held-settlements`, який я додав, БУВ
+відкритий — того ж класу, що й старий `/registry/register`. Виправлено:
+`/admin/*` вимкнено без `ADMIN_API_TOKEN` (403), інакше Bearer-токен
+(`hmac.compare_digest`); `/balance` — публічно лише агрегат, деталь `sales`
+(адреси покупців + tx) під тим самим токеном. Повна таблиця «маршрут → хто →
+де перевірка» без порожніх клітинок: `04-route-access.md`. Коміт `6397ede`.
+
+**2. Вибір провайдера з resolve()-списку.** Раніше агент брав `verified[0]` —
+проблема просто переїхала б з SQL у виклик. Тепер критерій ЯВНИЙ і НАЗВАНИЙ:
+`agent_client.select_provider` → `SELECTION_FIRST_REGISTERED` (прототипний
+дефолт: серверний порядок реєстрації) або `SELECTION_ALLOWLIST` (prefer_owner).
+Обраний критерій кладеться в `_selected_by` і друкується в демо. Коміт `6397ede`.
+
+**3. Покриття `service_provider/server.py`.** Була знахідка 0% (тестувався лише
+через демо, не pytest). Закрито: `tests/test_server_routes.py` (FastAPI
+TestClient) підняв server.py **0% → 86%**. Пряма відповідь: **так, знахідка
+закрита**.
+
+Повна таблиця покриття (`pytest --cov`, після всіх виправлень; **105 passed**,
+TOTAL **89%**):
+
+| Модуль | Cover | Прим. |
+|---|---|---|
+| `money.py` | **100%** | грошова межа |
+| `facilitator/store.py` | **100%** | (було 94%) |
+| `facilitator/settlement.py` | **100%** | (було 94%) |
+| `facilitator/payment.py` | **98%** | лишок — рядок 44 (bytes-nonce хелпер) |
+| `facilitator/capability.py` | **100%** | |
+| `facilitator/events.py` | **100%** | |
+| `facilitator/policy.py` | **100%** | |
+| `facilitator/reputation.py` | **100%** | |
+| `facilitator/identity.py` | **97%** | |
+| `facilitator/whitechain_facilitator.py` | **94%** | |
+| `registry_auth.py` | **90%** | нова (F4) |
+| `service_provider/server.py` | **86%** | **було 0% — ЗНАХІДКА ЗАКРИТА**; лишок — `__main__`/uvicorn + дрібні гілки |
+| `config.py` | 94% | |
+| `chain.py` | 88% | інфра w3 |
+| `agent_client.py` | 64% | HTTP-гілки покриті частково (discovery/pay-and-fetch — через демо) |
+| `author/agent.py` | 0% | Claude-покупець (потребує ANTHROPIC_API_KEY; свідомо поза pytest) |
+| `wallets/setup_wallets.py` | 0% | генерація гаманців (CLI entry point, без юнітів) |
+| **TOTAL** | **89%** | |
+
+Грошові/безпекові модулі — 98–100%. Нижчі цифри (`agent_client` 64%,
+`author/agent` 0%, `wallets` 0%) — це клієнтські/CLI-шляхи, не серверна логіка
+коштів; `author/agent` і `wallets` потребують зовнішніх ключів/мережі.
+
+**4. Дешеві roadmap-пункти.**
+- **Lock-файл:** `requirements.lock` — замикання прямих залежностей, запінене на
+  версії аудиту, лише пакети проєкту (встановлюється чисто деінде). Коміт `bd714ac`.
+- **Мертвий код:** видалено `redis`/`pillow` (deps) і `send_wbt`/`explorer_link`
+  (Фаза-0 хелпери, 0 викликів). `author/agent.py` СВІДОМО лишено (Claude
+  tool-use покупець — головна теза, окрема точка входу) і приведено до F4
+  (перевірений запис + `expected_pay_to`). Коміт `1d33de4`.
 
 ---
 
