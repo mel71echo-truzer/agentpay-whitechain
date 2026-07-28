@@ -1,0 +1,89 @@
+# Lock-файл: зафіксовані версії ЗАМИКАННЯ прямих залежностей проєкту
+# (requirements.txt + requirements-dev.txt), запіновані на версії, проти
+# яких реально ганявся аудит (importlib.metadata у робочому середовищі).
+# Тільки пакети проєкту — без OS-рівневих пакетів базового образу, тож
+# встановлюється чисто деінде:
+#     pip install -r requirements.lock
+# Оновити після зміни requirements*.txt:
+#     pip install -U -r requirements.txt -r requirements-dev.txt && \
+#     regenerate (див. docs/audit).
+#
+# requirements.txt лишається джерелом прямих залежностей (нижні межі >=);
+# цей файл — точний знімок усього дерева на момент аудиту.
+#
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.1
+aiosignal==1.4.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.117.0
+anyio==4.14.2
+attrs==26.1.0
+bitarray==3.9.0
+cached-property==2.0.1
+certifi==2026.2.25
+charset-normalizer==3.4.6
+ckzg==2.1.8
+click==8.4.2
+cytoolz==1.1.0
+distro==1.9.0
+docstring_parser==0.18.0
+eth-account==0.13.7
+eth-bloom==3.1.0
+eth-hash==0.8.0
+eth-keyfile==0.8.1
+eth-keys==0.7.0
+eth-rlp==2.2.0
+eth-tester==0.13.0b1
+eth-typing==6.0.0
+eth-utils==6.0.0
+eth_abi==6.0.0b1
+fastapi==0.139.2
+frozenlist==1.8.0
+h11==0.16.0
+hexbytes==1.3.1
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.11
+iniconfig==2.3.0
+jiter==0.16.0
+lru-dict==1.4.1
+markdown-it-py==4.2.0
+mdurl==0.1.2
+multidict==6.7.1
+packaging==24.0
+parsimonious==0.10.0
+pluggy==1.6.0
+propcache==0.5.2
+py-ecc==8.0.0
+py-evm==0.12.1b1
+pycryptodome==3.23.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+Pygments==2.20.0
+pytest==9.1.1
+python-dotenv==1.2.2
+pyunormalize==17.0.0
+PyYAML==6.0.1
+regex==2026.7.10
+requests==2.33.1
+rich==15.0.0
+rlp==4.1.0
+safe-pysha3==1.0.5
+semantic-version==2.10.0
+sniffio==1.3.1
+sortedcontainers==2.4.0
+starlette==1.3.1
+toolz==1.1.0
+trie==3.1.0
+types-requests==2.33.0.20260712
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+urllib3==2.6.3
+uvicorn==0.51.0
+uvloop==0.22.1
+watchfiles==1.2.0
+web3==7.16.0
+websockets==15.0.1
+yarl==1.24.2

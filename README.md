@@ -242,7 +242,9 @@ git clone <this-repo-url>
 cd agentpay-whitechain
 
 # Python side
-pip install -r requirements.txt
+pip install -r requirements.txt          # direct deps, lower-bounded (>=)
+# — or, for a byte-for-byte reproducible environment (exact pinned versions
+#   the audit ran against): pip install -r requirements.lock
 cp .env.example .env
 
 # Solidity side (compiles the contracts scripts/demo.py and the tests deploy)
