@@ -61,7 +61,7 @@ class PaymentValidator:
             "verifyingContract": self.teurc.address,
         }
 
-    def validate_authorization(self, authorization: dict, resource: str, resource_salt: str, price_teurc: float) -> dict:
+    def validate_authorization(self, authorization: dict, resource: str, resource_salt: str, price_wei: int) -> dict:
         from_addr = Web3.to_checksum_address(authorization["from"])
 
         # 1. resource binding.
@@ -80,12 +80,22 @@ class PaymentValidator:
             }
 
         # 2. EIP-712 підпис.
+        # Числові поля з недовіреного входу парсимо явно; нечислове значення —
+        # чиста відмова, а не необроблений виняток нагору.
+        try:
+            value = int(authorization["value"])
+            valid_after = int(authorization["validAfter"])
+            valid_before = int(authorization["validBefore"])
+        except (TypeError, ValueError, KeyError):
+            return {"ok": False, "reason": "Некоректний тип числових полів авторизації.", "message": None}
+        if value < 0:
+            return {"ok": False, "reason": "Сума не може бути від'ємною.", "message": None}
         message = {
             "from": from_addr,
             "to": Web3.to_checksum_address(authorization["to"]),
-            "value": int(authorization["value"]),
-            "validAfter": int(authorization["validAfter"]),
-            "validBefore": int(authorization["validBefore"]),
+            "value": value,
+            "validAfter": valid_after,
+            "validBefore": valid_before,
             "nonce": given_nonce,
         }
         signable = encode_typed_data(self._eip712_domain(), TRANSFER_AUTH_TYPES, message)
@@ -114,11 +124,25 @@ class PaymentValidator:
         # 5. Отримувач + сума.
         if message["to"].lower() != self.facilitator_address.lower():
             return {"ok": False, "reason": "Авторизація призначена не на адресу facilitator-а.", "message": None}
-        price_wei = round(price_teurc * (10**self.teurc_decimals))
+        # price_wei приходить уже як int wei (конверсія — на межі, config/money).
+        # Вимагаємо ТОЧНУ суму. Overpayment (value > price) відхиляємо, а не
+        # приймаємо мовчки (рішення №5): у поточній архітектурі немає шляху
+        # повернення надлишку — facilitator релеїть повний підписаний value,
+        # тож переплата застрягла б у facilitator без вороття до платника (той
+        # самий клас, що й «утримані кошти»). Без return-path — тільки відмова.
         if message["value"] < price_wei:
             return {
                 "ok": False,
                 "reason": f"Сума замала: {message['value']} < {price_wei} (потрібна ціна ресурсу).",
+                "message": None,
+            }
+        if message["value"] > price_wei:
+            return {
+                "ok": False,
+                "reason": (
+                    f"Переплата: {message['value']} > {price_wei}. Надлишок не повертається — "
+                    "підпиши авторизацію рівно на ціну ресурсу."
+                ),
                 "message": None,
             }
 

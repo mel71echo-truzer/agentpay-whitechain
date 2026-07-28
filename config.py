@@ -15,7 +15,21 @@ import os
 
 from dotenv import load_dotenv
 
+import money
+
 load_dotenv()
+
+TEURC_DECIMALS = 6
+
+
+def _price_wei_env(name: str, default_teurc: str) -> int:
+    """Ціна з .env (людський рядок tEURC) → int wei НА ЗАВАНТАЖЕННІ (рішення №4).
+
+    Парсимо через Decimal і одразу конвертуємо в int wei; далі в грошових
+    шляхах float не існує. Ціна з >TEURC_DECIMALS знаками падає тут, гучно,
+    на старті — а не округлюється тихо."""
+    value = os.getenv(name)
+    return money.teurc_to_wei(value if value else default_teurc, TEURC_DECIMALS)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -57,8 +71,8 @@ IS_VERIFIED_ATTRIBUTE_ADDRESS = os.getenv("IS_VERIFIED_ATTRIBUTE_ADDRESS", "")
 SBT_COLLECTION_ADDRESS = os.getenv("SBT_COLLECTION_ADDRESS", "")
 
 # --- tEURC (тестовий євро-стейблкоїн, EIP-3009) ---
+# TEURC_DECIMALS визначено вгорі (потрібне для _price_wei_env).
 TEURC_ADDRESS = os.getenv("TEURC_ADDRESS", "")
-TEURC_DECIMALS = 6
 
 # --- Гаманці ---
 # Автор (агент-покупець) — підписує EIP-3009 authorization, ніколи не платить gas сам.
@@ -77,8 +91,15 @@ SERVICE_PROVIDER_HOST = os.getenv("SERVICE_PROVIDER_HOST", "127.0.0.1")
 SERVICE_PROVIDER_PORT = _int_env("SERVICE_PROVIDER_PORT", 8000)
 SERVICE_PROVIDER_BASE_URL = f"http://{SERVICE_PROVIDER_HOST}:{SERVICE_PROVIDER_PORT}"
 
-RESOURCE_PRICE_TEURC = _float_env("RESOURCE_PRICE_TEURC", 0.02)
-PREMIUM_RESOURCE_PRICE_TEURC = _float_env("PREMIUM_RESOURCE_PRICE_TEURC", 0.10)
+# Операторський токен для /admin/* (звірка утриманих коштів тощо). ПОРОЖНІЙ за
+# замовчуванням = /admin вимкнено (403), НЕ відкрито. Заданий => потрібен
+# заголовок `Authorization: Bearer <token>`. Ніколи не логуємо саме значення.
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
+
+# Ціни зберігаємо у int wei (мінімальні одиниці tEURC). Env-значення лишаються
+# людськими (0.02), але конвертуються в wei на завантаженні (рішення №4).
+RESOURCE_PRICE_WEI = _price_wei_env("RESOURCE_PRICE_TEURC", "0.02")
+PREMIUM_RESOURCE_PRICE_WEI = _price_wei_env("PREMIUM_RESOURCE_PRICE_TEURC", "0.10")
 # Мінімальний reputation_tier (кількість SBT-бейджів), потрібний для преміум-ресурсу.
 PREMIUM_MIN_REPUTATION_TIER = _int_env("PREMIUM_MIN_REPUTATION_TIER", 1)
 
@@ -86,7 +107,7 @@ PREMIUM_MIN_REPUTATION_TIER = _int_env("PREMIUM_MIN_REPUTATION_TIER", 1)
 FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 
 # --- Ліміт витрат агента-автора на завдання ---
-AUTHOR_MAX_SPEND_TEURC = _float_env("AUTHOR_MAX_SPEND_TEURC", 1.0)
+AUTHOR_MAX_SPEND_WEI = _price_wei_env("AUTHOR_MAX_SPEND_TEURC", "1.0")
 SPEND_LEDGER_PATH = os.getenv("SPEND_LEDGER_PATH", ".spend_ledger.json")
 
 # --- Фаза 2: settlement, reputation, event store ---

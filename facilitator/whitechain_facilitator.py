@@ -31,6 +31,7 @@ from web3 import Web3
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import chain  # noqa: E402
 import config  # noqa: E402
+import money  # noqa: E402
 from facilitator import events as events_mod  # noqa: E402
 from facilitator import identity as identity_mod  # noqa: E402
 from facilitator import policy as policy_mod  # noqa: E402
@@ -38,7 +39,7 @@ from facilitator import reputation as reputation_mod  # noqa: E402
 from facilitator.events import EventLog  # noqa: E402
 from facilitator.identity import IdentityReader  # noqa: E402
 from facilitator.payment import PaymentValidator  # noqa: E402
-from facilitator.settlement import SettlementEngine, SettlementError  # noqa: E402
+from facilitator.settlement import SettlementEngine, SettlementError, SettlementForwardError  # noqa: E402
 from facilitator.store import Store  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -114,11 +115,13 @@ class WhitechainFacilitator:
         authorization: dict,
         resource: str,
         resource_salt: str,
-        price_teurc: float,
+        price_wei: int,
         min_reputation_tier: int = 0,
     ) -> dict:
         """Оркеструє повний цикл: identity -> policy -> payment -> settlement
-        -> event -> response. Сигнатура і ключі результату — як у Фазі 1.
+        -> event -> response. Гроші — int wei (рішення №4): price_wei приходить
+        уже сконвертованим на межі (config/money), у цьому шляху float немає.
+        Відповідь несе авторитетні *_wei (int) + людські *_teurc (рядок).
         """
         from_addr = Web3.to_checksum_address(authorization["from"])
         emitted: list[dict] = []
@@ -133,22 +136,42 @@ class WhitechainFacilitator:
 
         # 2. Policy (KYA + reputation gate).
         decision = policy_mod.check_policy(
-            agent_identity, {"min_reputation_tier": min_reputation_tier, "price_teurc": price_teurc}
+            agent_identity, {"min_reputation_tier": min_reputation_tier, "price_wei": price_wei}
         )
         if not decision["allow"]:
             return self._deny(decision["reason"], agent_identity, emitted)
 
         # 3. Payment (офчейн EIP-712/EIP-3009 валідація).
-        validation = self.payment.validate_authorization(authorization, resource, resource_salt, price_teurc)
+        validation = self.payment.validate_authorization(authorization, resource, resource_salt, price_wei)
         if not validation["ok"]:
             return self._deny(validation["reason"], agent_identity, emitted)
         emit(events_mod.AUTHORIZATION_VALIDATED)
 
         # 4. Settlement (релей + форвард комісії).
+        # Журнал ПЕРЕД бродкастом (рішення №3): фіксуємо намір рушити кошти
+        # ДО будь-якої транзакції, щоб «завислий» розрахунок був відновлюваний.
+        emit(events_mod.SETTLEMENT_INITIATED)
         try:
             result = self.settlement.settle(validation["message"], authorization)
+        except SettlementForwardError as exc:
+            # ЧАСТКОВИЙ збій: релей пройшов (кошти у facilitator), форвард — ні.
+            # Явний, придатний для звірки стан «кошти утримані, зобов'язання
+            # не виконане». БЕЗ авто-ретраю (рішення №3): tx_hash релею
+            # журналюється для ручної/окремої реконсиляції. Доступ НЕ видаємо.
+            logger.error(
+                "Частковий збій сеттлменту: кошти утримані relay=%s net_wei=%s: %s",
+                exc.relay_tx_hash, exc.net_wei, exc,
+            )
+            emit(events_mod.SETTLEMENT_FUNDS_HELD, tx_hash=exc.relay_tx_hash)
+            return self._deny(
+                "Кошти утримані, зобов'язання не виконане (форвард сервісу "
+                "відкотився). Розрахунок зафіксовано для звірки.",
+                agent_identity, emitted,
+            )
         except SettlementError as exc:
-            logger.warning("Settlement провалився: %s", exc)
+            # Чистий збій: релей не пройшов, кошти не рухалися.
+            logger.warning("Settlement провалився (кошти не рухалися): %s", exc)
+            emit(events_mod.SETTLEMENT_FAILED)
             return self._deny(f"Розрахунок не вдався: {exc}", agent_identity, emitted)
         emit(events_mod.SETTLEMENT_SUBMITTED, tx_hash=result["relay_tx_hash"])
         if result["confirmed"]:
@@ -161,21 +184,33 @@ class WhitechainFacilitator:
         # SettlementConfirmed, якщо WAIT_FOR_CONFIRMATION=true).
         emit(events_mod.ACCESS_GRANTED, tx_hash=result["relay_tx_hash"])
 
-        scale = 10**config.TEURC_DECIMALS
+        dec = config.TEURC_DECIMALS
+        amount_wei = validation["message"]["value"]
         return {
             "valid": True,
             "reason": "Оплату прийнято офчейн; розрахунок проведено.",
             "reputation_tier": agent_identity["reputation_tier"],
             "reputation_score": agent_identity["reputation_score"],
             "soul_id": agent_identity["soul_id"],
-            "amount_teurc": validation["message"]["value"] / scale,
-            "fee_teurc": result["fee_wei"] / scale,
-            "net_to_service_provider_teurc": result["net_wei"] / scale,
+            # Авторитетні суми — int wei; людські *_teurc — рядок (без float).
+            "amount_wei": amount_wei,
+            "fee_wei": result["fee_wei"],
+            "net_wei": result["net_wei"],
+            "amount_teurc": money.wei_to_teurc_str(amount_wei, dec),
+            "fee_teurc": money.wei_to_teurc_str(result["fee_wei"], dec),
+            "net_to_service_provider_teurc": money.wei_to_teurc_str(result["net_wei"], dec),
             "relay_tx_hash": result["relay_tx_hash"],
             "forward_tx_hash": result["forward_tx_hash"],
             "settlement_status": result["status"],
             "events": emitted,
         }
+
+    def list_held_settlements(self, limit: int = 100) -> list[dict]:
+        """Звірка (рішення №3): розрахунки з утриманими коштами (релей пройшов,
+        форвард відкотився). Кожен запис несе tx_hash релею → операційна
+        команда може простежити суму on-chain і провести форвард вручну.
+        БЕЗ авто-ретраю — це навмисно окреме рішення, не сайд-ефект."""
+        return self.store.list_events(event_type=events_mod.SETTLEMENT_FUNDS_HELD, limit=limit)
 
     def _deny(self, reason: str, agent_identity: dict, emitted: list[dict]) -> dict:
         return {

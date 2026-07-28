@@ -242,7 +242,9 @@ git clone <this-repo-url>
 cd agentpay-whitechain
 
 # Python side
-pip install -r requirements.txt
+pip install -r requirements.txt          # direct deps, lower-bounded (>=)
+# — or, for a byte-for-byte reproducible environment (exact pinned versions
+#   the audit ran against): pip install -r requirements.lock
 cp .env.example .env
 
 # Solidity side (compiles the contracts scripts/demo.py and the tests deploy)
@@ -323,12 +325,42 @@ agentpay-whitechain/
 - **Chain:** Whitechain testnet (Chain ID 2625), gas in WBT
 - **Server:** FastAPI
 
+## Store schema & local state (breaking change)
+
+The facilitator keeps a small local SQLite store (`STORE_DB_PATH`, default
+`.agentpay.db`) with three tables — `agent_stats`, `events`, `capabilities`.
+This is a **derived, off-chain cache**: the source of truth for money is
+on-chain, and this file can be regenerated.
+
+The schema is versioned via `PRAGMA user_version` (current: **2**). A
+**breaking change** landed in this version: `capabilities.price` (REAL, a
+float euro amount) became **`price_wei` (INTEGER, minimal units)** as part of
+moving all money paths to integer wei. There is **no automatic migration** —
+the store deliberately does not rewrite your data.
+
+If you point the facilitator at an **older `.db`** (schema version < 2), it
+**fails loudly at startup** with `StoreSchemaError` instead of opening and
+then crashing later on the first write. To recover, delete the stale file and
+its lock sidecar and let the state rebuild from the chain:
+
+```bash
+rm -f .agentpay.db .agentpay.db.lock   # or whatever STORE_DB_PATH points to
+```
+
+…or set `STORE_DB_PATH` to a fresh path. (Demos and tests use `:memory:`, so
+they're always fresh and unaffected.)
+
 ## Trade-offs worth knowing about
 
 - **Fee via custody, not an atomic split.** The facilitator receives the
   full payment at its own address, then forwards price-minus-fee to the
   service provider in a second transaction. Simpler than an atomic router
-  contract, but it means the facilitator briefly custodies buyer funds.
+  contract, but it means the facilitator briefly custodies buyer funds. If the
+  relay confirms but the forward reverts, the settlement is journaled as an
+  explicit **funds-held / obligation-unmet** state (no silent loss) rather than
+  retried automatically. Operators can list these for reconciliation via
+  `GET /admin/held-settlements` (each entry carries the relay tx hash);
+  forwarding them is a deliberate manual step, not an automatic retry.
 - **Confirmation vs. latency.** By default (`WAIT_FOR_CONFIRMATION=true`)
   the resource is released only after the relay's receipt is mined
   (SettlementConfirmed), which closes the off-chain race where content

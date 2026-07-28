@@ -1,58 +1,158 @@
-import os
+"""Settlement — релей оплати on-chain + форвард комісії (Фаза 2, Компонент 1).
+
+Єдина відповідальність: узяти вже провалідовану authorization і провести
+розрахунок у мережі. Тримає ЧІТКИЙ seam: у Фазі 2.5 весь цей клас
+замінюється на виклик атомарного router/escrow-контракту БЕЗ зміни
+сигнатури settle() чи місць виклику.
+
+Поточна (Фаза 2) реалізація — той самий "receive-full-then-forward"
+підхід, що й Фаза 1 (facilitator отримує повну суму, лишає комісію,
+форвардить решту сервісу двома послідовними транзакціями). Router з
+атомарним split — Roadmap (Phase 2.5).
+
+Race-fix (Компонент 4): якщо wait_for_confirmation=True (за замовчуванням),
+settle() ДОЧІКУЄТЬСЯ receipt релею (і форварду) і повертає status="confirmed"
+лише після підтвердження блоку. Оркестратор видає ресурс саме на цьому
+підтвердженні, а не на broadcast — це закриває off-chain race (контент
+роздано, а платіж потім відкотився). wait_for_confirmation=False лишає
+старий швидкий шлях (broadcast, status="submitted") — тільки для швидкого
+локального demo; trade-off задокументований у README.
+"""
+
+from __future__ import annotations
+
+import logging
+
 from web3 import Web3
-from eth_account import Account
 
-# AgentPayRouter ABI for atomic settlement
-ROUTER_ABI = [
-    {
-        "inputs": [
-            {"internalType": "address", "name": "from", "type": "address"},
-            {"internalType": "address", "name": "seller", "type": "address"},
-            {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "uint256", "name": "validAfter", "type": "uint256"},
-            {"internalType": "uint256", "name": "validBefore", "type": "uint256"},
-            {"internalType": "bytes32", "name": "nonce", "type": "bytes32"},
-            {"internalType": "uint8", "name": "v", "type": "uint8"},
-            {"internalType": "bytes32", "name": "r", "type": "bytes32"},
-            {"internalType": "bytes32", "name": "s", "type": "bytes32"}
-        ],
-        "name": "settlePaymentAtomic",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    }
-]
+import chain
 
-class SettlementService:
-    def __init__(self, w3: Web3, router_address: str, facilitator_private_key: str):
+logger = logging.getLogger(__name__)
+
+
+class SettlementError(Exception):
+    """Базовий: розрахунок не вдався on-chain (revert / RPC-помилка)."""
+
+
+class SettlementRelayError(SettlementError):
+    """Релей `transferWithAuthorization` відкотився — кошти НЕ рухалися.
+
+    Чистий збій: платника не списано (авторизаційний nonce не спожито
+    успішно), форвард навіть не пробувався. Компенсація не потрібна.
+    """
+
+
+class SettlementForwardError(SettlementError):
+    """Релей пройшов (кошти вже у facilitator), але форвард сервісу відкотився.
+
+    Це ЧАСТКОВИЙ збій: платника списано, нетто сервісу НЕ переслано → кошти
+    утримані у facilitator, зобов'язання не виконане. Несе `relay_tx_hash`
+    (для звірки on-chain) і `net_wei` (скільки винні сервісу). Ретрай форварду
+    свідомо НЕ автоматичний (рішення №3) — це окреме операційне рішення.
+    """
+
+    def __init__(self, message: str, *, relay_tx_hash, net_wei: int):
+        super().__init__(message)
+        self.relay_tx_hash = relay_tx_hash
+        self.net_wei = net_wei
+
+
+class SettlementEngine:
+    def __init__(
+        self,
+        w3,
+        teurc,
+        *,
+        facilitator_private_key: str,
+        service_provider_address: str,
+        fee_bps: int,
+        teurc_decimals: int,
+        wait_for_confirmation: bool = True,
+        confirmation_timeout: int = 120,
+    ):
         self.w3 = w3
-        self.router_address = Web3.to_checksum_address(router_address)
-        self.account = Account.from_key(facilitator_private_key)
-        self.contract = self.w3.eth.contract(address=self.router_address, abi=ROUTER_ABI)
+        self.teurc = teurc
+        self.facilitator_private_key = facilitator_private_key
+        self.service_provider_address = service_provider_address
+        self.fee_bps = fee_bps
+        self.teurc_decimals = teurc_decimals
+        self.wait_for_confirmation = wait_for_confirmation
+        self.confirmation_timeout = confirmation_timeout
 
-    def settle_atomic_payment(self, payment_data: dict, seller_address: str) -> str:
+    def settle(self, message: dict, authorization: dict) -> dict:
+        """Релеїть transferWithAuthorization і форвардить комісію.
+
+        Повертає {
+          "relay_tx_hash", "forward_tx_hash",
+          "status": "confirmed"|"submitted",
+          "confirmed": bool,
+          "fee_wei", "net_wei",
+        }.
+        Кидає SettlementError, якщо (у режимі confirmation) релей відкотився.
         """
-        Calls AgentPayRouter.settlePaymentAtomic to process EIP-3009 payment on-chain.
-        """
-        seller = Web3.to_checksum_address(seller_address)
-        from_address = Web3.to_checksum_address(payment_data["from"])
+        value = message["value"]
 
-        tx = self.contract.functions.settlePaymentAtomic(
-            from_address,
-            seller,
-            int(payment_data["amount"]),
-            int(payment_data["validAfter"]),
-            int(payment_data["validBefore"]),
-            bytes.fromhex(payment_data["nonce"].replace("0x", "")),
-            int(payment_data["v"]),
-            bytes.fromhex(payment_data["r"].replace("0x", "")),
-            bytes.fromhex(payment_data["s"].replace("0x", ""))
-        ).build_transaction({
-            'from': self.account.address,
-            'nonce': self.w3.eth.get_transaction_count(self.account.address),
-            'gasPrice': self.w3.eth.gas_price
-        })
+        relay_tx_hash = chain.send_contract_tx(
+            self.w3,
+            self.facilitator_private_key,
+            self.teurc.functions.transferWithAuthorization(
+                message["from"],
+                message["to"],
+                value,
+                message["validAfter"],
+                message["validBefore"],
+                message["nonce"],
+                authorization["v"],
+                authorization["r"],
+                authorization["s"],
+            ),
+        )
 
-        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        return tx_hash.hex()
+        confirmed = False
+        if self.wait_for_confirmation:
+            receipt = self.w3.eth.wait_for_transaction_receipt(relay_tx_hash, timeout=self.confirmation_timeout)
+            if receipt.status != 1:
+                # Релей відкотився: кошти не рухалися, форвард не пробуємо.
+                raise SettlementRelayError(f"Релей транзакції {relay_tx_hash} відкотився (status != 1).")
+            confirmed = True
+
+        # Гроші — int wei; розподіл цілочисловий (рішення №4).
+        # РІШЕННЯ: залишок від floor-ділення комісії дістається СЕРВІСУ, не
+        # facilitator-у. fee_wei округлюється ВНИЗ (floor), а net = value - fee,
+        # тож будь-який суб-bps залишок опиняється в net (у сервіса). Це свідомий
+        # вибір на користь продавця, а не побічний ефект округлення.
+        # Інваріант: fee_wei + net_wei == value точно (нічого не «зникає»).
+        fee_wei = (value * self.fee_bps) // 10_000
+        net_wei = value - fee_wei
+
+        forward_tx_hash = None
+        if net_wei > 0 and self.service_provider_address:
+            forward_tx_hash = chain.send_contract_tx(
+                self.w3,
+                self.facilitator_private_key,
+                self.teurc.functions.transfer(
+                    Web3.to_checksum_address(self.service_provider_address), net_wei
+                ),
+            )
+            if self.wait_for_confirmation:
+                fwd_receipt = self.w3.eth.wait_for_transaction_receipt(
+                    forward_tx_hash, timeout=self.confirmation_timeout
+                )
+                if fwd_receipt.status != 1:
+                    # Релей уже пройшов (кошти у facilitator), форвард — ні:
+                    # частковий збій. Несемо relay_tx_hash+net_wei для звірки.
+                    raise SettlementForwardError(
+                        f"Форвард нетто {forward_tx_hash} відкотився (status != 1); "
+                        f"релей {relay_tx_hash} пройшов — кошти утримані.",
+                        relay_tx_hash=relay_tx_hash,
+                        net_wei=net_wei,
+                    )
+
+        return {
+            "relay_tx_hash": relay_tx_hash,
+            "forward_tx_hash": forward_tx_hash,
+            "status": "confirmed" if confirmed else "submitted",
+            "confirmed": confirmed,
+            "fee_wei": fee_wei,
+            "net_wei": net_wei,
+        }

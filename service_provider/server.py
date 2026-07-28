@@ -25,17 +25,20 @@
 """
 
 import base64
+import hmac
 import json
 import logging
 import re
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+import money  # noqa: E402
+import registry_auth  # noqa: E402
 from facilitator.capability import CapabilityRegistry  # noqa: E402
 from facilitator.whitechain_facilitator import WhitechainFacilitator  # noqa: E402
 
@@ -63,8 +66,9 @@ facilitator: WhitechainFacilitator | None = None
 # Ініціалізується разом із facilitator через init_facilitator().
 capability_registry: CapabilityRegistry | None = None
 
-# Стан AI Service Provider тримаємо в пам'яті процесу — для PoC-демо цього достатньо.
-_ledger = {"earned_teurc": 0.0, "sales": []}
+# Стан AI Service Provider тримаємо в пам'яті процесу — для PoC-демо цього
+# достатньо. Заробіток — int wei (рішення №4): без float-накопичення/дрейфу.
+_ledger = {"earned_wei": 0, "sales": []}
 
 
 def init_facilitator(fac: WhitechainFacilitator) -> None:
@@ -74,26 +78,34 @@ def init_facilitator(fac: WhitechainFacilitator) -> None:
     global facilitator, capability_registry
     facilitator = fac
     capability_registry = CapabilityRegistry(fac.store)
-    capability_registry.register(
-        {
-            "id": "ai-service-provider-1",
-            "capability_type": config.CAPABILITY_TYPE,
-            "provider_url": config.SERVICE_PROVIDER_BASE_URL,
-            "price": config.RESOURCE_PRICE_TEURC,
-            "min_reputation_tier": 0,
-            "active": True,
-        }
-    )
+    # Провайдер сам підписує свій запис реєстру (F4 #A): id == його адреса,
+    # pay_to == адреса facilitator-а (куди реально йдуть кошти). Без ключа
+    # провайдера цей запис не зареєструвати й не підмінити.
+    record = {
+        "id": config.SERVICE_PROVIDER_WALLET_ADDRESS,
+        "capability_type": config.CAPABILITY_TYPE,
+        "provider_url": config.SERVICE_PROVIDER_BASE_URL,
+        "pay_to": config.FACILITATOR_WALLET_ADDRESS,
+        "price_wei": config.RESOURCE_PRICE_WEI,
+        "min_reputation_tier": 0,
+        "active": True,
+    }
+    signature = registry_auth.sign_registration(record, config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY)
+    capability_registry.register(record, signature)
 
 
-def _price_and_tier_for(name: str) -> tuple[float, int]:
+def _price_and_tier_for(name: str) -> tuple[int, int]:
+    """Повертає (price_wei, min_reputation_tier). Ціна — int wei."""
     if name in PREMIUM_RESOURCE_NAMES:
-        return config.PREMIUM_RESOURCE_PRICE_TEURC, config.PREMIUM_MIN_REPUTATION_TIER
-    return config.RESOURCE_PRICE_TEURC, 0
+        return config.PREMIUM_RESOURCE_PRICE_WEI, config.PREMIUM_MIN_REPUTATION_TIER
+    return config.RESOURCE_PRICE_WEI, 0
 
 
-def _payment_requirements(resource_path: str, price_teurc: float, min_reputation_tier: int) -> dict:
-    """Формує x402 payment requirements — тіло 402-відповіді."""
+def _payment_requirements(resource_path: str, price_wei: int, min_reputation_tier: int) -> dict:
+    """Формує x402 payment requirements — тіло 402-відповіді.
+
+    B3: авторитетна ціна — int `price_wei`; `price_teurc` (рядок) лишається
+    для показу людині. Клієнт підписує суму саме за `price_wei`."""
     return {
         "x402Version": 1,
         "accepts": [
@@ -103,7 +115,8 @@ def _payment_requirements(resource_path: str, price_teurc: float, min_reputation
                 "payTo": config.FACILITATOR_WALLET_ADDRESS,
                 "asset": "tEURC",
                 "asset_address": config.TEURC_ADDRESS,
-                "price_teurc": price_teurc,
+                "price_wei": price_wei,
+                "price_teurc": money.wei_to_teurc_str(price_wei, config.TEURC_DECIMALS),
                 "resource": resource_path,
                 "min_reputation_tier": min_reputation_tier,
                 "description": f"Resource: {resource_path}",
@@ -129,29 +142,68 @@ def registry_capabilities(type: str | None = None):
 
 @app.post("/registry/register")
 async def registry_register(request: Request):
-    """Провайдер публікує можливість: {id, capability_type, provider_url, price, min_reputation_tier, active}."""
+    """Провайдер публікує ПІДПИСАНУ можливість (F4 #A):
+    {id, capability_type, provider_url, pay_to, price_wei, min_reputation_tier,
+     active, signature}. Підпис (ключем провайдера) обов'язковий; `id` мусить
+    дорівнювати адресі підписанта. Без валідного підпису — 400."""
     if capability_registry is None:
         return JSONResponse(status_code=503, content={"error": "Реєстр ще не ініціалізований."})
     raw_body = await request.body()
     if len(raw_body) > _MAX_BODY_FIELD_LEN:
         return JSONResponse(status_code=400, content={"error": "Тіло запиту завелике."})
     try:
-        record = json.loads(raw_body)
-        normalized = capability_registry.register(record)
-    except (ValueError, TypeError) as exc:
-        return JSONResponse(status_code=400, content={"error": f"Некоректний запис можливості: {exc}"})
+        body = json.loads(raw_body)
+        if not isinstance(body, dict):
+            raise ValueError("тіло має бути об'єктом")
+        signature = body.get("signature")
+        record = {k: v for k, v in body.items() if k != "signature"}
+        normalized = capability_registry.register(record, signature)
+    except (ValueError, TypeError, KeyError) as exc:
+        return JSONResponse(status_code=400, content={"error": f"Некоректний/непідписаний запис: {exc}"})
     except Exception:  # noqa: BLE001 — недовірений вхід; ніколи не 500
         return JSONResponse(status_code=400, content={"error": "Не вдалося зареєструвати можливість."})
     return {"registered": normalized}
+
+
+def _admin_auth_error(authorization: str | None) -> JSONResponse | None:
+    """Контроль доступу до /admin/*. Повертає JSONResponse-помилку або None (ок).
+
+    ПОРОЖНІЙ ADMIN_API_TOKEN => /admin ВИМКНЕНО (403), а не відкрито — безпечний
+    дефолт. Заданий => потрібен `Authorization: Bearer <token>`; звіряємо у
+    сталий час (hmac.compare_digest). Значення токена не логуємо."""
+    if not config.ADMIN_API_TOKEN:
+        return JSONResponse(status_code=403, content={"error": "Адмін-ендпойнти вимкнені (ADMIN_API_TOKEN не заданий)."})
+    expected = f"Bearer {config.ADMIN_API_TOKEN}"
+    if not authorization or not hmac.compare_digest(authorization, expected):
+        return JSONResponse(status_code=401, content={"error": "Потрібен дійсний Authorization: Bearer токен."})
+    return None
+
+
+@app.get("/admin/held-settlements")
+def held_settlements(authorization: str | None = Header(default=None)):
+    """Звірка (F3, рішення №3): розрахунки з утриманими коштами (релей пройшов,
+    форвард відкотився) — кожен несе tx_hash релею для ручного форварду. Read-only,
+    ОПЕРАТОРСЬКИЙ: під токеном (/admin/*), вимкнений якщо ADMIN_API_TOKEN не заданий.
+    Порожньо = немає незавершених зобов'язань."""
+    auth_error = _admin_auth_error(authorization)
+    if auth_error is not None:
+        return auth_error
+    if facilitator is None:
+        return JSONResponse(status_code=503, content={"error": "Facilitator не ініціалізований."})
+    held = facilitator.list_held_settlements()
+    return {"held_count": len(held), "held": held}
 
 
 @app.get("/photos")
 def list_photos():
     """Список доступних фото, ціни і які з них преміум."""
     names = sorted(p.stem for p in IMAGES_DIR.glob("*.png"))
+    dec = config.TEURC_DECIMALS
     return {
-        "price_teurc": config.RESOURCE_PRICE_TEURC,
-        "premium_price_teurc": config.PREMIUM_RESOURCE_PRICE_TEURC,
+        "price_wei": config.RESOURCE_PRICE_WEI,
+        "price_teurc": money.wei_to_teurc_str(config.RESOURCE_PRICE_WEI, dec),
+        "premium_price_wei": config.PREMIUM_RESOURCE_PRICE_WEI,
+        "premium_price_teurc": money.wei_to_teurc_str(config.PREMIUM_RESOURCE_PRICE_WEI, dec),
         "premium_min_reputation_tier": config.PREMIUM_MIN_REPUTATION_TIER,
         "premium_resources": sorted(PREMIUM_RESOURCE_NAMES),
         "photos": names,
@@ -159,14 +211,20 @@ def list_photos():
 
 
 @app.get("/balance")
-def balance():
-    """Скільки AI Service Provider заробив (нетто, після комісії facilitator-а)."""
-    return {
+def balance(authorization: str | None = Header(default=None)):
+    """Заробіток AI Service Provider (нетто). ПУБЛІЧНО — лише агрегат (сума +
+    кількість продажів, це вітрина доходу). Детальний список `sales` містить
+    адреси покупців і tx-хеші — його віддаємо ЛИШЕ під адмін-токеном (той самий
+    контроль, що й /admin/*), щоб не зливати покупця↔покупку публічно."""
+    result = {
         "address": config.SERVICE_PROVIDER_WALLET_ADDRESS,
-        "earned_teurc": round(_ledger["earned_teurc"], 6),
+        "earned_wei": _ledger["earned_wei"],
+        "earned_teurc": money.wei_to_teurc_str(_ledger["earned_wei"], config.TEURC_DECIMALS),
         "sales_count": len(_ledger["sales"]),
-        "sales": _ledger["sales"],
     }
+    if _admin_auth_error(authorization) is None:  # адмін -> додаємо деталізацію
+        result["sales"] = _ledger["sales"]
+    return result
 
 
 @app.get("/photo/{name}")
@@ -238,10 +296,13 @@ async def pay_for_photo(name: str, request: Request):
             },
         )
 
-    _ledger["earned_teurc"] += result["net_to_service_provider_teurc"]
+    # Заробіток рахуємо в int wei (авторитетне net_wei), без float-накопичення.
+    _ledger["earned_wei"] += result["net_wei"]
     _ledger["sales"].append(
         {
             "photo": name,
+            "amount_wei": result["amount_wei"],
+            "fee_wei": result["fee_wei"],
             "amount_teurc": result["amount_teurc"],
             "fee_teurc": result["fee_teurc"],
             "from": authorization["from"],

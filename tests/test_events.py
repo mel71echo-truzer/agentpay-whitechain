@@ -15,10 +15,10 @@ from facilitator import events as ev  # noqa: E402
 from facilitator.settlement import SettlementError  # noqa: E402
 
 
-def _sign(fx, agent, resource, value_teurc=None):
-    value_teurc = fx.price_teurc if value_teurc is None else value_teurc
+def _sign(fx, agent, resource, value_wei=None):
+    value_wei = fx.price_wei if value_wei is None else value_wei
     return agent_client.build_and_sign_authorization(
-        agent.key.hex(), fx.facilitator_acct.address, value_teurc, resource, fx.teurc.address, fx.w3.eth.chain_id
+        agent.key.hex(), fx.facilitator_acct.address, value_wei, resource, fx.teurc.address, fx.w3.eth.chain_id
     )
 
 
@@ -32,7 +32,7 @@ def test_access_granted_after_settlement_confirmed(facilitator_setup):
     payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra")
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is True
@@ -56,7 +56,7 @@ def test_resource_not_granted_if_settlement_never_confirms(facilitator_setup, mo
     monkeypatch.setattr(fx.facilitator.settlement, "settle", failing_settle)
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is False  # доступу немає
@@ -72,7 +72,7 @@ def test_fast_path_no_confirmation_wait(facilitator_setup):
     payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra")
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is True
@@ -86,7 +86,7 @@ def test_events_persisted_to_store(facilitator_setup):
     fx = facilitator_setup
     payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra")
     fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
     stored = fx.facilitator.store.list_events(agent=fx.verified_no_sbt_agent.address)
     stored_types = {e["event_type"] for e in stored}

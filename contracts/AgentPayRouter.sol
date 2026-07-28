@@ -1,6 +1,35 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ROADMAP ARTIFACT — NOT WIRED INTO THE PAYMENT FLOW.
+//
+// This contract is the Phase 2.5 direction. It is intentionally NOT connected to
+// the running system: no Python code deploys or calls it (the live settlement
+// path is facilitator/settlement.py::SettlementEngine, an off-chain EIP-3009
+// relay-then-forward).
+//
+// WHY IT IS VALUABLE: settlePaymentAtomic does receive + fee-split + seller
+// payout in ONE transaction, so it removes the partial-failure window that the
+// current off-chain path has to handle with a journal + an explicit
+// "funds held / obligation unmet" state (finding F3, commit 1530c73). Atomicity
+// on-chain would make that reconciliation machinery unnecessary.
+//
+// WHAT BLOCKS WIRING IT IN NOW (interface mismatch — see
+// docs/audit/05-main-reconciliation.md, section "next task"):
+//   - it calls receiveWithAuthorization (payer must sign to = this router),
+//     while the client currently signs TransferWithAuthorization (to =
+//     facilitator). tEURC already implements BOTH typehashes, so the token is
+//     ready — the change is client-side: the signature type in agent_client.py
+//     and the `to ==` check in payment.py.
+//   - it gates on KYA only (soulOf + isVerified); there is no reputation/SBT
+//     tier gate here, so the reputation policy must stay off-chain, by design.
+//   - settlePaymentAtomic ignores transfer()'s return value (safe with this
+//     tEURC, which reverts, but a pattern to fix before wiring).
+// The orphaned client for this router (main's SettlementService) was dropped in
+// the merge; recover it from history at commit a53b097 if needed.
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface IERC20Permit3009 {
     function receiveWithAuthorization(
         address from,

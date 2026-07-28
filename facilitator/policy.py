@@ -15,7 +15,7 @@ from __future__ import annotations
 
 
 def check_policy(agent_identity: dict, resource: dict) -> dict:
-    """resource: {"min_reputation_tier": int, "price_teurc": float, ...}."""
+    """resource: {"min_reputation_tier": int, "price_wei": int, ...}."""
     if not agent_identity.get("has_soul"):
         return {"allow": False, "reason": "Агент не має верифікованого WB Soul (not KYA-verified)."}
 

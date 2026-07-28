@@ -5,8 +5,14 @@
 має ts, тож різниця між подіями = latency-метрики для README/пітчу.
 
 Канонічні типи подій платіжного циклу:
-  PaymentRequested -> AuthorizationValidated -> SettlementSubmitted
-  -> SettlementConfirmed -> AccessGranted
+  PaymentRequested -> AuthorizationValidated -> SettlementInitiated
+  -> SettlementSubmitted -> SettlementConfirmed -> AccessGranted
+
+Термінальні стани збою розрахунку (для звірки):
+  SettlementFailed  — релей не пройшов, кошти НЕ рухалися (чисто).
+  SettlementFundsHeld — релей пройшов, форвард відкотився: кошти утримані
+                        у facilitator, зобов'язання (форвард сервісу) не
+                        виконане. Несе tx_hash релею для звірки on-chain.
 """
 
 from __future__ import annotations
@@ -17,9 +23,14 @@ logger = logging.getLogger("agentpay.events")
 
 PAYMENT_REQUESTED = "PaymentRequested"
 AUTHORIZATION_VALIDATED = "AuthorizationValidated"
+# Журнал ПЕРЕД бродкастом: маркер «зараз рушимо кошти» (рішення №3). Дозволяє
+# виявити «завислий» розрахунок, якщо процес упав між ним і термінальною подією.
+SETTLEMENT_INITIATED = "SettlementInitiated"
 SETTLEMENT_SUBMITTED = "SettlementSubmitted"
 SETTLEMENT_CONFIRMED = "SettlementConfirmed"
 ACCESS_GRANTED = "AccessGranted"
+SETTLEMENT_FAILED = "SettlementFailed"
+SETTLEMENT_FUNDS_HELD = "SettlementFundsHeld"
 
 
 class EventLog:

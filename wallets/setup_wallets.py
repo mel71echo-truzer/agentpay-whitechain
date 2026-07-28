@@ -45,56 +45,9 @@ def check_balance(address: str, w3: Web3 | None = None) -> float:
     return float(Web3.from_wei(balance_wei, "ether"))
 
 
-def send_wbt(
-    from_key: str,
-    to_address: str,
-    amount_wbt: float,
-    w3: Web3 | None = None,
-    data: bytes | None = None,
-) -> str:
-    """Відправляє WBT з одного гаманця на інший. Повертає хеш транзакції.
-
-    from_key    — приватний ключ гаманця-відправника (з .env, ніколи не хардкодь)
-    to_address  — адреса гаманця-отримувача
-    amount_wbt  — сума у WBT (наприклад 0.02)
-    data        — необов'язковий calldata (наприклад назва ресурсу, який
-                  оплачується — див. author/x402_client.py). Прив'язує цю
-                  конкретну транзакцію до конкретного ресурсу назавжди
-                  (calldata незмінний після підпису), тож звичайних
-                  21000 газу для чистого переказу вже не вистачить —
-                  у цьому випадку рахуємо потрібний газ через estimate_gas.
-    """
-    w3 = w3 or get_web3()
-    account = Account.from_key(from_key)
-    to_address = Web3.to_checksum_address(to_address)
-
-    tx = {
-        "from": account.address,
-        "to": to_address,
-        "value": Web3.to_wei(amount_wbt, "ether"),
-        "nonce": w3.eth.get_transaction_count(account.address),
-        "chainId": config.CHAIN_ID,
-        "gasPrice": w3.eth.gas_price,
-    }
-    if data:
-        tx["data"] = data
-        tx["gas"] = w3.eth.estimate_gas(tx) + 10_000  # запас про всяк випадок
-    else:
-        tx["gas"] = 21000  # стандартна вартість чистого переказу без calldata
-
-    signed_tx = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    # web3.py v7 повертає hex без префіксу "0x" — без нього посилання в
-    # explorer ламаються, тож додаємо його тут один раз (без подвоєння).
-    h = tx_hash.hex()
-    return h if h.startswith("0x") else "0x" + h
-
-
-def explorer_link(tx_hash: str) -> str:
-    """Формує посилання на транзакцію в Whitechain explorer."""
-    tx_hash = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
-    return f"{config.WHITECHAIN_EXPLORER_URL}/tx/{tx_hash}"
+# Примітка: send_wbt()/explorer_link() (нативні WBT-перекази Фази 0) видалені —
+# у Фазі 1+ кошти рухаються в tEURC через EIP-3009-релей facilitator-а, а не
+# нативним WBT. Ці помічники ніде не викликалися (мертвий код Фази 0).
 
 
 if __name__ == "__main__":

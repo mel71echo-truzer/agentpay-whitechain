@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import chain  # noqa: E402
 import config  # noqa: E402
+import money  # noqa: E402
 
 
 @dataclass
@@ -37,8 +38,10 @@ class FacilitatorFixture:
     verified_agent: LocalAccount
     verified_no_sbt_agent: LocalAccount
     unverified_agent: LocalAccount
-    price_teurc: float = 0.02
-    premium_price_teurc: float = 0.10
+    # Гроші — int wei (рішення №4). Ціни зберігаємо як wei; teurc-рядки лишаємо
+    # лише для читабельності намірів тесту.
+    price_wei: int = 20_000  # 0.02 tEURC
+    premium_price_wei: int = 100_000  # 0.10 tEURC
     premium_min_reputation_tier: int = 1
 
 
@@ -74,10 +77,11 @@ def facilitator_setup(tmp_path):
     config.FACILITATOR_WALLET_ADDRESS = facilitator_acct.address
     config.FACILITATOR_WALLET_PRIVATE_KEY = facilitator_acct.key.hex()
     config.SERVICE_PROVIDER_WALLET_ADDRESS = service_provider_acct.address
+    config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY = service_provider_acct.key.hex()
     config.CHAIN_ID = w3.eth.chain_id
     config.FACILITATOR_FEE_BPS = 50
     config.SPEND_LEDGER_PATH = str(tmp_path / "spend_ledger.json")
-    config.AUTHOR_MAX_SPEND_TEURC = 1.0
+    config.AUTHOR_MAX_SPEND_WEI = money.teurc_to_wei("1.0", config.TEURC_DECIMALS)
 
     teurc = chain.get_contract(w3, "tEURC", teurc_addr)
     soul_registry = chain.get_contract(w3, "MockSoulRegistry", soul_registry_addr)

@@ -17,17 +17,126 @@ import threading
 import time
 from pathlib import Path
 
+# Файловий лок «один процес» реалізований по-різному на POSIX і Windows.
+# fcntl існує ЛИШЕ в Unix — на Windows його імпорт валить увесь застосунок,
+# тому обираємо бекенд на етапі імпорту, а не всередині функції.
+try:  # POSIX (Linux, macOS)
+    import fcntl
+
+    msvcrt = None
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+
+# Версія схеми store. Піднімай при БУДЬ-ЯКІй зміні структури таблиць, щоб старий
+# файл БД не відкривався мовчки й не падав пізніше на першому несумісному записі.
+#   1 — початкова схема Фази 2 (capabilities.price REAL).
+#   2 — money-type міграція: capabilities.price -> price_wei INTEGER (09b3a4c).
+#   3 — підписана реєстрація (F4 #A): capabilities += owner_address, pay_to,
+#       signature, created_at; вибір провайдера за серверним created_at/rowid.
+CURRENT_SCHEMA_VERSION = 3
+
+
+class StoreLockError(RuntimeError):
+    """Файл БД уже відкрито іншим процесом/інстансом Store.
+
+    Кидається на старті, коли ексклюзивний файловий лок узяти не вдалося —
+    ознака, що запущено кілька воркерів/процесів на тому самому файлі БД.
+    Див. інваріант «один процес» нижче.
+    """
+
+
+class StoreSchemaError(RuntimeError):
+    """Наявний файл БД має НЕСУМІСНУ (стару) схему.
+
+    Store не мігрує автоматично (свідомо: локальний кеш — похідний стан, істина
+    по коштах живе on-chain). Замість тихого падіння пізніше на першому записі —
+    гучна, дієва помилка на старті. Див. README → «Store schema / breaking change».
+    """
+
 
 class Store:
+    # ІНВАРІАНТ КОНКУРЕНТНОСТІ (свідома межа, не недогляд):
+    # self._lock (threading.Lock) серіалізує записи ТІЛЬКИ в межах ОДНОГО
+    # процесу. Кілька процесів (напр. `uvicorn --workers N` або кілька
+    # інстансів) мали б кожен свій Lock і свою серіалізацію — атомарність
+    # лічильників (increment_completed_payment тощо) втратилася б, бо
+    # read-modify-write у різних процесах не координується Python-локом.
+    # Тому система розрахована на ОДИН процес, і це тут форсується
+    # ексклюзивним файловим локом (fcntl.flock) на сайдкар-файлі `<db>.lock`:
+    # другий процес/інстанс на тому самому файлі БД падає зі StoreLockError
+    # на старті — гучно, а не тихо ламаючи інваріанти.
+    # Для горизонтального масштабування (кілька процесів) цього НЕ досить —
+    # знадобляться транзакції рівня БД (напр. SELECT ... FOR UPDATE у
+    # Postgres) або міжпроцесні блокування. Це свідомо поза скоупом PoC:
+    # межу зафіксовано, БД не мігровано.
     def __init__(self, db_path: str = ":memory:"):
         self.db_path = db_path
+        self._flock_fd = None
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._acquire_single_process_lock(db_path)
         # check_same_thread=False: uvicorn обслуговує sync-роут у тред-пулі.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._guard_schema_version()
         self._init_schema()
+
+    def _guard_schema_version(self) -> None:
+        """Гучно відхиляє наявний файл БД зі старою/несумісною схемою.
+
+        Використовує `PRAGMA user_version`. Якщо наші таблиці вже існують, а
+        версія не збігається з CURRENT_SCHEMA_VERSION — це старий файл (напр.
+        до money-type міграції), який мовчки відкрився б і впав пізніше на
+        першому записі (`no column named price_wei`). Замість цього — чиста
+        відмова на старті. Свіжій БД проставляємо поточну версію."""
+        with self._lock, self._conn:
+            existing_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            row = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='capabilities'"
+            ).fetchone()
+            tables_pre_exist = row is not None
+            if tables_pre_exist and existing_version != CURRENT_SCHEMA_VERSION:
+                raise StoreSchemaError(
+                    f"Файл БД '{self.db_path}' має несумісну схему "
+                    f"(version={existing_version}, потрібно {CURRENT_SCHEMA_VERSION}). "
+                    "Store не мігрує автоматично — це локальний похідний кеш "
+                    "(agent_stats/events/capabilities), істина по коштах on-chain. "
+                    "Видали файл (і сайдкар .lock) або вкажи новий STORE_DB_PATH; "
+                    "стан відновиться з ланцюга. Деталі: README → Store schema."
+                )
+            # Свіжа або вже поточна БД — фіксуємо версію (idempotent).
+            self._conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+
+    def _acquire_single_process_lock(self, db_path: str) -> None:
+        """Бере ексклюзивний неблокуючий файловий лок на `<db>.lock`.
+
+        Якщо лок уже тримає інший процес/інстанс — flock поверне EAGAIN,
+        і ми падаємо зі StoreLockError замість тихо запуститися другим
+        воркером і зламати in-process-серіалізацію. `:memory:` сюди не
+        потрапляє (окрема БД на з'єднання).
+        """
+        lock_path = f"{db_path}.lock"
+        # "a+" (не "w"): на Windows усічення файлу, чиї байти залоковані іншим
+        # процесом, саме по собі впало б помилкою доступу, а не StoreLockError.
+        fd = open(lock_path, "a+")  # noqa: SIM115 — тримаємо fd весь час життя Store
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:  # Windows: лок 1 байта з позиції 0, теж ексклюзивний і неблокуючий
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            fd.close()
+            raise StoreLockError(
+                f"Файл БД '{db_path}' уже відкрито іншим процесом/інстансом Store. "
+                "Система розрахована на ОДИН процес — не запускайте кілька воркерів "
+                "(`uvicorn --workers N`) чи інстансів на тому самому STORE_DB_PATH. "
+                "Для масштабування потрібні транзакції рівня БД, а не Python-Lock."
+            ) from exc
+        self._flock_fd = fd
 
     def _init_schema(self) -> None:
         with self._lock, self._conn:
@@ -53,9 +162,13 @@ class Store:
                     id TEXT PRIMARY KEY,
                     capability_type TEXT NOT NULL,
                     provider_url TEXT NOT NULL,
-                    price REAL NOT NULL DEFAULT 0,
+                    pay_to TEXT NOT NULL DEFAULT '',
+                    owner_address TEXT NOT NULL DEFAULT '',
+                    price_wei INTEGER NOT NULL DEFAULT 0,
                     min_reputation_tier INTEGER NOT NULL DEFAULT 0,
-                    active INTEGER NOT NULL DEFAULT 1
+                    active INTEGER NOT NULL DEFAULT 1,
+                    signature TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -123,40 +236,61 @@ class Store:
             event_id = cur.lastrowid
         return {"id": event_id, "ts": ts, "agent": agent, "resource": resource, "event_type": event_type, "tx_hash": tx_hash}
 
-    def list_events(self, *, agent: str | None = None, limit: int = 100) -> list[dict]:
+    def list_events(
+        self, *, agent: str | None = None, event_type: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        # Параметризовані умови (без конкатенації значень у SQL).
+        conditions, params = [], []
+        if agent:
+            conditions.append("agent = ?")
+            params.append(agent)
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        query = "SELECT * FROM events"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         with self._lock:
-            if agent:
-                rows = self._conn.execute(
-                    "SELECT * FROM events WHERE agent = ? ORDER BY id DESC LIMIT ?", (agent, limit)
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
+            rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     # -------------------- capabilities --------------------
 
     def upsert_capability(self, record: dict) -> None:
         with self._lock, self._conn:
+            # created_at ставимо ЛИШЕ на першому вставленні; при оновленні запису
+            # зберігаємо оригінальний час реєстрації (порядок вибору стабільний).
             self._conn.execute(
                 """
-                INSERT INTO capabilities (id, capability_type, provider_url, price, min_reputation_tier, active)
-                VALUES (:id, :capability_type, :provider_url, :price, :min_reputation_tier, :active)
+                INSERT INTO capabilities
+                    (id, capability_type, provider_url, pay_to, owner_address,
+                     price_wei, min_reputation_tier, active, signature, created_at)
+                VALUES
+                    (:id, :capability_type, :provider_url, :pay_to, :owner_address,
+                     :price_wei, :min_reputation_tier, :active, :signature, :created_at)
                 ON CONFLICT(id) DO UPDATE SET
                     capability_type=excluded.capability_type,
                     provider_url=excluded.provider_url,
-                    price=excluded.price,
+                    pay_to=excluded.pay_to,
+                    owner_address=excluded.owner_address,
+                    price_wei=excluded.price_wei,
                     min_reputation_tier=excluded.min_reputation_tier,
-                    active=excluded.active
+                    active=excluded.active,
+                    signature=excluded.signature
                 """,
                 {
                     "id": record["id"],
                     "capability_type": record["capability_type"],
                     "provider_url": record["provider_url"],
-                    "price": record.get("price", 0),
+                    "pay_to": record.get("pay_to", ""),
+                    "owner_address": record.get("owner_address", ""),
+                    "price_wei": int(record.get("price_wei", 0) or 0),
                     "min_reputation_tier": record.get("min_reputation_tier", 0),
                     "active": 1 if record.get("active", True) else 0,
+                    "signature": record.get("signature", ""),
+                    "created_at": time.time(),
                 },
             )
 
@@ -170,7 +304,10 @@ class Store:
             conditions.append("active = 1")
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY id"
+        # Порядок — за СЕРВЕРНИМИ значеннями (created_at, потім rowid як tie-break),
+        # НЕ за жодним полем, що його контролює реєстрант (напр. id/адреса, яку
+        # можна грайндити вибором vanity-адреси). Див. registry_auth / F4 #A.
+        query += " ORDER BY created_at ASC, rowid ASC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         result = []
@@ -183,3 +320,16 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        if self._flock_fd is not None:
+            # Звільняємо файловий лок — легітимний рестарт того ж процесу
+            # (напр. у тестах) зможе відкрити БД знову.
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self._flock_fd.fileno(), fcntl.LOCK_UN)
+                else:
+                    self._flock_fd.seek(0)
+                    msvcrt.locking(self._flock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass  # лок і так зникне при закритті дескриптора
+            self._flock_fd.close()
+            self._flock_fd = None

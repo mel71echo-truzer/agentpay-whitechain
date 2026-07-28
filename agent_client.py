@@ -32,6 +32,7 @@ from web3 import Web3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import registry_auth  # noqa: E402
 
 TRANSFER_AUTH_TYPES = {
     "TransferWithAuthorization": [
@@ -70,59 +71,107 @@ def discover_capabilities(registry_url: str, capability_type: str | None = None)
     return resp.json().get("capabilities", [])
 
 
-def resolve_provider_url(registry_url: str, capability_type: str) -> str:
-    """Знаходить provider_url для типу можливості через реєстр (не хардкод).
+def verify_capability_record(record: dict) -> str:
+    """Перевіряє підпис запису discovery (F4 #A): підпис валідний і owner==id.
+    Повертає owner (checksummed) або кидає ValueError. Агент НЕ бере запис із
+    discovery на віру — сам звіряє підпис, а не покладається лише на реєстр."""
+    return registry_auth.verify_registration(record, record.get("signature", ""))
 
-    Це і є суть Компонента 2: агент НЕ знає адресу сервісу заздалегідь —
-    він її резолвить за capability_type.
-    """
+
+# НАЗВАНИЙ критерій вибору провайдера, коли їх кілька (F4). Прототипний дефолт —
+# FIRST_REGISTERED: перший у СЕРВЕРНОМУ порядку реєстрації (created_at/rowid у
+# store, не контрольований реєстрантом). Це свідомий вибір прототипу, НЕ
+# ранжування за репутацією. Продакшн має передавати prefer_owner (allowlist
+# довірених owner-адрес) АБО ранжувати за on-chain-репутацією власника — тоді
+# критерій стане ALLOWLIST/REPUTATION відповідно. Головне: серед КІЛЬКОХ
+# провайдерів вибір ніколи не має бути «сліпий [0]» без названого правила.
+SELECTION_FIRST_REGISTERED = "first-registered"
+SELECTION_ALLOWLIST = "allowlist-owner"
+
+
+def select_provider(verified_candidates: list[dict], *, prefer_owner: str | None = None) -> tuple[dict, str]:
+    """Обирає одного провайдера зі списку ПЕРЕВІРЕНИХ кандидатів за НАЗВАНИМ
+    критерієм. Повертає (запис, назва_критерію) — критерій явний і придатний
+    для логування/аудиту, а не побічний ефект індексації."""
+    if prefer_owner is not None:
+        for c in verified_candidates:
+            if str(c.get("id", "")).lower() == prefer_owner.lower():
+                return c, SELECTION_ALLOWLIST
+        raise CapabilityNotFound(f"Немає перевіреного провайдера з owner={prefer_owner}.")
+    # Прототипний дефолт: перший зареєстрований (серверний порядок).
+    return verified_candidates[0], SELECTION_FIRST_REGISTERED
+
+
+def resolve_capability(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> dict:
+    """Резолвить ПЕРЕВІРЕНИЙ запис можливості через реєстр.
+
+    Реєстр повертає ВСІ збіги в серверному порядку. Агент (а) відкидає записи з
+    невалідним підписом, (б) обирає одного за НАЗВАНИМ критерієм (`select_provider`),
+    а не сліпим matches[0]. Обраний критерій кладемо у запис (`_selected_by`) для
+    прозорості."""
     caps = discover_capabilities(registry_url, capability_type)
-    if not caps:
-        raise CapabilityNotFound(f"Реєстр не має активного провайдера типу '{capability_type}'.")
-    return caps[0]["provider_url"]
+    verified = []
+    for c in caps:
+        try:
+            verify_capability_record(c)
+        except (ValueError, KeyError):
+            continue  # непідписаний/підроблений запис ігноруємо
+        verified.append(c)
+    if not verified:
+        raise CapabilityNotFound(f"Реєстр не має ПЕРЕВІРЕНОГО провайдера типу '{capability_type}'.")
+    chosen, criterion = select_provider(verified, prefer_owner=prefer_owner)
+    chosen = {**chosen, "_selected_by": criterion}
+    return chosen
+
+
+def resolve_provider_url(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> str:
+    """provider_url перевіреного провайдера (тонка обгортка resolve_capability)."""
+    return resolve_capability(registry_url, capability_type, prefer_owner=prefer_owner)["provider_url"]
 
 
 class SpendLedger:
-    """Веде облік, скільки Автор уже витратив (у tEURC) у межах завдання.
+    """Веде облік, скільки Автор уже витратив (у wei) у межах завдання.
 
-    Зберігається в JSON-файлі (config.SPEND_LEDGER_PATH), щоб ліміт
-    зберігався навіть якщо процес перезапустити всередині одного завдання.
+    Гроші — int wei (рішення №4): жодного float у лічильнику, точний ліміт без
+    накопичувального дрейфу. Зберігається в JSON-файлі (config.SPEND_LEDGER_PATH),
+    щоб ліміт переживав перезапуск процесу всередині одного завдання.
     """
 
-    def __init__(self, path: str | None = None, max_spend_teurc: float | None = None):
+    def __init__(self, path: str | None = None, max_spend_wei: int | None = None):
         self.path = Path(path or config.SPEND_LEDGER_PATH)
-        self.max_spend_teurc = (
-            max_spend_teurc if max_spend_teurc is not None else config.AUTHOR_MAX_SPEND_TEURC
+        self.max_spend_wei = (
+            max_spend_wei if max_spend_wei is not None else config.AUTHOR_MAX_SPEND_WEI
         )
         self._state = self._load()
 
     def _load(self) -> dict:
         if self.path.exists():
             return json.loads(self.path.read_text())
-        return {"spent_teurc": 0.0, "payments": []}
+        return {"spent_wei": 0, "payments": []}
 
     def _save(self) -> None:
         self.path.write_text(json.dumps(self._state, indent=2))
 
     def reset(self) -> None:
         """Скидає лічильник — виклич на початку нового завдання."""
-        self._state = {"spent_teurc": 0.0, "payments": []}
+        self._state = {"spent_wei": 0, "payments": []}
         self._save()
 
     @property
-    def spent_teurc(self) -> float:
-        return self._state["spent_teurc"]
+    def spent_wei(self) -> int:
+        return self._state["spent_wei"]
 
-    def ensure_can_spend(self, amount_teurc: float) -> None:
-        if self.spent_teurc + amount_teurc > self.max_spend_teurc + 1e-12:
+    def ensure_can_spend(self, amount_wei: int) -> None:
+        # Ціла арифметика — точне порівняння, без float-епсилону.
+        if self.spent_wei + amount_wei > self.max_spend_wei:
             raise SpendLimitExceeded(
-                f"Ліміт вичерпано: вже витрачено {self.spent_teurc} tEURC, "
-                f"ще {amount_teurc} tEURC перевищить максимум {self.max_spend_teurc} tEURC на завдання."
+                f"Ліміт вичерпано: вже витрачено {self.spent_wei} wei, "
+                f"ще {amount_wei} wei перевищить максимум {self.max_spend_wei} wei на завдання."
             )
 
-    def record(self, amount_teurc: float, to: str, relay_tx_hash: str | None) -> None:
-        self._state["spent_teurc"] += amount_teurc
-        self._state["payments"].append({"amount_teurc": amount_teurc, "to": to, "relay_tx_hash": relay_tx_hash})
+    def record(self, amount_wei: int, to: str, relay_tx_hash: str | None) -> None:
+        self._state["spent_wei"] += amount_wei
+        self._state["payments"].append({"amount_wei": amount_wei, "to": to, "relay_tx_hash": relay_tx_hash})
         self._save()
 
 
@@ -132,7 +181,7 @@ class PurchaseResult:
     content_type: str
     already_had_it: bool = False
     reputation_tier: int | None = None
-    fee_teurc: float | None = None
+    fee_teurc: str | None = None  # людський рядок (B3), лише для показу
     relay_tx_hash: str | None = None
     forward_tx_hash: str | None = None
     log: list[str] | None = None
@@ -141,7 +190,7 @@ class PurchaseResult:
 def build_and_sign_authorization(
     private_key: str,
     to_address: str,
-    value_teurc: float,
+    value_wei: int,
     resource: str,
     teurc_address: str,
     chain_id: int,
@@ -157,7 +206,8 @@ def build_and_sign_authorization(
     nonce = Web3.keccak(resource.encode("utf-8") + salt)
 
     now = int(time.time())
-    value_wei = round(value_teurc * (10**config.TEURC_DECIMALS))
+    # value_wei — уже int wei (конверсія на межі виклику). Валідуємо тип.
+    value_wei = int(value_wei)
 
     message = {
         "from": account.address,
@@ -198,12 +248,18 @@ def pay_and_fetch(
     private_key: str | None = None,
     ledger=None,
     chain_id: int | None = None,
+    expected_pay_to: str | None = None,
 ) -> PurchaseResult:
     """GET url; якщо 402 — підписує authorization офчейн і повторює запит.
 
     ledger — необов'язковий SpendLedger (див. author/agent.py) для
     перевірки ліміту витрат ПЕРЕД підписом (підпис ще не витрачає нічого
     сам собою, але немає сенсу підписувати те, що ліміт однаково відхилить).
+
+    expected_pay_to — якщо передано (з ПІДПИСАНОГО запису реєстру), звіряємо
+    його з `payTo` із 402: розбіжність = HARD-FAIL, відмова платити (F4 #A).
+    Так агент не підписує авторизацію на адресу, якої немає в підписаному
+    записі провайдера — навіть якщо provider_url скомпрометовано.
     """
     private_key = private_key or config.AUTHOR_WALLET_PRIVATE_KEY
     log: list[str] = []
@@ -224,19 +280,26 @@ def pay_and_fetch(
     requirements = response.json()
     accept = requirements["accepts"][0]
     pay_to = accept["payTo"]
-    price_teurc = accept["price_teurc"]
+    # HARD-FAIL: payTo з 402 мусить збігтися з підписаним записом реєстру (F4 #A).
+    if expected_pay_to is not None and str(pay_to).lower() != expected_pay_to.lower():
+        raise PaymentFailed(
+            f"payTo із 402 ({pay_to}) не збігається з підписаним записом реєстру "
+            f"({expected_pay_to}) — відмова платити (можлива підміна provider_url)."
+        )
+    # Авторитетна сума з 402 — int wei (B3). price_teurc лишається для показу.
+    price_wei = int(accept["price_wei"])
     resource = accept["resource"]
     teurc_address = accept["asset_address"]
 
-    log.append(f"Сервер просить {price_teurc} tEURC на {pay_to} за {resource}")
+    log.append(f"Сервер просить {accept.get('price_teurc')} tEURC ({price_wei} wei) на {pay_to} за {resource}")
 
     if ledger is not None:
-        ledger.ensure_can_spend(price_teurc)
+        ledger.ensure_can_spend(price_wei)
 
     payload = build_and_sign_authorization(
         private_key,
         pay_to,
-        price_teurc,
+        price_wei,
         resource,
         teurc_address,
         chain_id if chain_id is not None else config.CHAIN_ID,
