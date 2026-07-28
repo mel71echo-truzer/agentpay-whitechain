@@ -8,6 +8,12 @@ Provider-і і сам вирішує, які саме купити — моде�
 Required -> офчейн-підпис EIP-3009 authorization -> facilitator валідує
 KYA/reputation/підпис і релеїть оплату в tEURC -> фото. Claude про сам факт
 оплати навіть не думає — деталі x402/EIP-3009/KYA сховані за інструментом.
+
+Чому цей модуль лишається (а не «мертвий код»): це показова реалізація
+головної тези проєкту — агент САМ вирішує заплатити. `scripts/demo.py` —
+детермінований офлайн-харнес (без Claude API), а це — жива інтеграція з Claude
+(`python -m author.agent "<завдання>"`, потрібен ANTHROPIC_API_KEY). Тому в
+тестах/демо не викликається, але лишається як окрема точка входу і демонстрація.
 """
 
 import json
@@ -18,6 +24,7 @@ from pathlib import Path
 import anthropic
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import agent_client  # noqa: E402
 import config  # noqa: E402
 from agent_client import PaymentFailed, SpendLedger, SpendLimitExceeded, pay_and_fetch  # noqa: E402
 
@@ -55,6 +62,9 @@ class AuthorAgent:
         self.purchases: list[dict] = []
         # on_event(dict) — необов'язковий callback для гарного виводу в scripts/demo.py
         self.on_event = on_event or (lambda event: None)
+        # F4: резолвимо ПЕРЕВІРЕНИЙ запис реєстру і закріплюємо pay_to, щоб кожна
+        # покупка звіряла payTo з 402 (не платимо на адресу поза підписаним записом).
+        self._expected_pay_to: str | None = None
 
     def _emit(self, **event) -> None:
         self.on_event(event)
@@ -63,7 +73,7 @@ class AuthorAgent:
         url = f"{config.SERVICE_PROVIDER_BASE_URL}/photo/{name}"
         self._emit(type="requesting", photo=name)
         try:
-            result = pay_and_fetch(url, ledger=self.ledger)
+            result = pay_and_fetch(url, ledger=self.ledger, expected_pay_to=self._expected_pay_to)
         except SpendLimitExceeded as exc:
             self._emit(type="limit_exceeded", photo=name, error=str(exc))
             return {"success": False, "error": str(exc)}
@@ -104,6 +114,10 @@ class AuthorAgent:
         """Виконує завдання: пише статтю, купуючи потрібні фото через buy_photo."""
         import requests
 
+        # F4: знаходимо провайдера через реєстр (перевірений підпис) і закріплюємо
+        # його pay_to для звірки payTo кожної 402-відповіді.
+        cap = agent_client.resolve_capability(config.SERVICE_PROVIDER_BASE_URL, config.CAPABILITY_TYPE)
+        self._expected_pay_to = cap["pay_to"]
         photos_catalog = requests.get(f"{config.SERVICE_PROVIDER_BASE_URL}/photos", timeout=10).json()
 
         system_prompt = (
