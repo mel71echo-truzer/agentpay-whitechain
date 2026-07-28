@@ -323,6 +323,31 @@ agentpay-whitechain/
 - **Chain:** Whitechain testnet (Chain ID 2625), gas in WBT
 - **Server:** FastAPI
 
+## Store schema & local state (breaking change)
+
+The facilitator keeps a small local SQLite store (`STORE_DB_PATH`, default
+`.agentpay.db`) with three tables — `agent_stats`, `events`, `capabilities`.
+This is a **derived, off-chain cache**: the source of truth for money is
+on-chain, and this file can be regenerated.
+
+The schema is versioned via `PRAGMA user_version` (current: **2**). A
+**breaking change** landed in this version: `capabilities.price` (REAL, a
+float euro amount) became **`price_wei` (INTEGER, minimal units)** as part of
+moving all money paths to integer wei. There is **no automatic migration** —
+the store deliberately does not rewrite your data.
+
+If you point the facilitator at an **older `.db`** (schema version < 2), it
+**fails loudly at startup** with `StoreSchemaError` instead of opening and
+then crashing later on the first write. To recover, delete the stale file and
+its lock sidecar and let the state rebuild from the chain:
+
+```bash
+rm -f .agentpay.db .agentpay.db.lock   # or whatever STORE_DB_PATH points to
+```
+
+…or set `STORE_DB_PATH` to a fresh path. (Demos and tests use `:memory:`, so
+they're always fresh and unaffected.)
+
 ## Trade-offs worth knowing about
 
 - **Fee via custody, not an atomic split.** The facilitator receives the

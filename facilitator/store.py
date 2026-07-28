@@ -19,12 +19,28 @@ import time
 from pathlib import Path
 
 
+# Версія схеми store. Піднімай при БУДЬ-ЯКІй зміні структури таблиць, щоб старий
+# файл БД не відкривався мовчки й не падав пізніше на першому несумісному записі.
+#   1 — початкова схема Фази 2 (capabilities.price REAL).
+#   2 — money-type міграція: capabilities.price -> price_wei INTEGER (09b3a4c).
+CURRENT_SCHEMA_VERSION = 2
+
+
 class StoreLockError(RuntimeError):
     """Файл БД уже відкрито іншим процесом/інстансом Store.
 
     Кидається на старті, коли ексклюзивний файловий лок узяти не вдалося —
     ознака, що запущено кілька воркерів/процесів на тому самому файлі БД.
     Див. інваріант «один процес» нижче.
+    """
+
+
+class StoreSchemaError(RuntimeError):
+    """Наявний файл БД має НЕСУМІСНУ (стару) схему.
+
+    Store не мігрує автоматично (свідомо: локальний кеш — похідний стан, істина
+    по коштах живе on-chain). Замість тихого падіння пізніше на першому записі —
+    гучна, дієва помилка на старті. Див. README → «Store schema / breaking change».
     """
 
 
@@ -53,7 +69,34 @@ class Store:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._guard_schema_version()
         self._init_schema()
+
+    def _guard_schema_version(self) -> None:
+        """Гучно відхиляє наявний файл БД зі старою/несумісною схемою.
+
+        Використовує `PRAGMA user_version`. Якщо наші таблиці вже існують, а
+        версія не збігається з CURRENT_SCHEMA_VERSION — це старий файл (напр.
+        до money-type міграції), який мовчки відкрився б і впав пізніше на
+        першому записі (`no column named price_wei`). Замість цього — чиста
+        відмова на старті. Свіжій БД проставляємо поточну версію."""
+        with self._lock, self._conn:
+            existing_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            row = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='capabilities'"
+            ).fetchone()
+            tables_pre_exist = row is not None
+            if tables_pre_exist and existing_version != CURRENT_SCHEMA_VERSION:
+                raise StoreSchemaError(
+                    f"Файл БД '{self.db_path}' має несумісну схему "
+                    f"(version={existing_version}, потрібно {CURRENT_SCHEMA_VERSION}). "
+                    "Store не мігрує автоматично — це локальний похідний кеш "
+                    "(agent_stats/events/capabilities), істина по коштах on-chain. "
+                    "Видали файл (і сайдкар .lock) або вкажи новий STORE_DB_PATH; "
+                    "стан відновиться з ланцюга. Деталі: README → Store schema."
+                )
+            # Свіжа або вже поточна БД — фіксуємо версію (idempotent).
+            self._conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
 
     def _acquire_single_process_lock(self, db_path: str) -> None:
         """Бере ексклюзивний неблокуючий файловий лок на `<db>.lock`.
