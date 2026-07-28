@@ -353,7 +353,12 @@ they're always fresh and unaffected.)
 - **Fee via custody, not an atomic split.** The facilitator receives the
   full payment at its own address, then forwards price-minus-fee to the
   service provider in a second transaction. Simpler than an atomic router
-  contract, but it means the facilitator briefly custodies buyer funds.
+  contract, but it means the facilitator briefly custodies buyer funds. If the
+  relay confirms but the forward reverts, the settlement is journaled as an
+  explicit **funds-held / obligation-unmet** state (no silent loss) rather than
+  retried automatically. Operators can list these for reconciliation via
+  `GET /admin/held-settlements` (each entry carries the relay tx hash);
+  forwarding them is a deliberate manual step, not an automatic retry.
 - **Confirmation vs. latency.** By default (`WAIT_FOR_CONFIRMATION=true`)
   the resource is released only after the relay's receipt is mined
   (SettlementConfirmed), which closes the off-chain race where content

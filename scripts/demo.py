@@ -346,6 +346,9 @@ def main() -> None:
     table.add_row("Видача ресурсу", "на SettlementConfirmed" if config.WAIT_FOR_CONFIRMATION else "на broadcast")
     if latency is not None:
         table.add_row("Latency PaymentRequested→AccessGranted", f"{latency*1000:.0f} ms")
+    # Звірка утриманих коштів (F3) — видимо оператору через /admin/held-settlements.
+    held = requests.get(f"{provider_url}/admin/held-settlements", timeout=10).json()
+    table.add_row("Утримано розрахунків (звірка F3)", str(held["held_count"]))
     console.print(table)
 
     server.should_exit = True

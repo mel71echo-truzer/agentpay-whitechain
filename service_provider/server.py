@@ -164,6 +164,18 @@ async def registry_register(request: Request):
     return {"registered": normalized}
 
 
+@app.get("/admin/held-settlements")
+def held_settlements():
+    """Звірка (F3, рішення №3): розрахунки з утриманими коштами (релей пройшов,
+    форвард відкотився) — кожен несе tx_hash релею для ручного форварду. Read-only,
+    операторський (сервер за замовчуванням слухає лише 127.0.0.1). Порожньо =
+    немає незавершених зобов'язань."""
+    if facilitator is None:
+        return JSONResponse(status_code=503, content={"error": "Facilitator не ініціалізований."})
+    held = facilitator.list_held_settlements()
+    return {"held_count": len(held), "held": held}
+
+
 @app.get("/photos")
 def list_photos():
     """Список доступних фото, ціни і які з них преміум."""
