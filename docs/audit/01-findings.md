@@ -25,8 +25,29 @@
 | F8 | identity `reputation_score` cold-start proxy | MINOR | report-only | — | — |
 | F9 | store: стара схема .db падала пізно й криптично | MAJOR | **виправлено** (PRAGMA user_version guard + README) | `36ded73` | `test_store_schema_version.py` ✓ |
 | F10 | `/admin/held-settlements` відкритий (внесено мною) + `/balance` зливав адреси покупців | MAJOR | **виправлено** (токен на /admin + деталь /balance; таблиця доступу) | `6397ede` | `test_server_routes.py` ✓ |
+| W1 | `eth-tester[py-evm]` → safe-pysha3 без Windows-колес | MAJOR (переносимість) | **виправлено** | `aa50ad5` | CI матриця windows-latest (`ci.yml`) |
+| W2 | `store.py` імпортував `fcntl`, якого немає у Windows | MAJOR (переносимість) | **виправлено** (fcntl/msvcrt-бекенд) | `aa50ad5` | CI windows import-smoke ловить регрес |
+| W3 | safe-pysha3 лишався в `requirements.lock` | MAJOR (переносимість) | **виправлено** | `03fff36` | CI `lock-install-windows` |
 
 ---
+
+## Windows-знахідки (W1–W3) — виявлені ПІСЛЯ закриття аудиту, на першому реальному прогоні на Windows
+
+> Цих трьох не бачили ані аудит, ані 105 тестів — **бо все ганялося лише в
+> Linux**. Знайдені при першому запуску на Windows; уже виправлені (`aa50ad5`,
+> `03fff36`); CI (`.github/workflows/ci.yml`) додано, щоб не повернулись.
+
+| # | Поломка | Чому Linux-only перевірка пропустила | Фікс | Як CI ловить |
+|---|---|---|---|---|
+| **W1** | `pip install` тягнув `safe-pysha3` (транзитив `eth-tester[py-evm]`), у якого **немає готових колес для Windows жодної версії Python** → pip вимагав Visual C++ Build Tools і падав | на Linux safe-pysha3 або має колесо, або збирається наявним gcc — інсталяція «просто працювала», тож проблему не видно | `aa50ad5`: `requirements-dev.txt` більше не використовує extra `[py-evm]`; ставимо `py-evm` напряму + `eth-hash[pycryptodome]` (pysha3 не потрібен) | job `test` на **windows-latest** робить той самий `pip install -r requirements-dev.txt` |
+| **W2** | `facilitator/store.py` (після M1) робив `import fcntl` на рівні модуля; **`fcntl` існує лише в Unix** → на Windows валився ІМПОРТ, застосунок не стартував зовсім | `fcntl` є на будь-якому Linux/macOS — імпорт завжди проходив; жоден тест не запускався на ОС без fcntl | `aa50ad5`: вибір бекенда на етапі імпорту — `fcntl` (POSIX) або `msvcrt` (Windows); той самий ексклюзивний неблокуючий лок | job `lock-install-windows` робить import-smoke `facilitator.store`; незахищений `import fcntl` там ре-ревертнув би у `ModuleNotFoundError` (перевірено локально симуляцією без fcntl) |
+| **W3** | той самий `safe-pysha3` лишався **зашитим у `requirements.lock`**, тож фікс W1 без нього був неповним — чистий `pip install -r requirements.lock` на Windows усе одно падав | lock згенеровано в Linux-середовищі, де safe-pysha3 стояв; його наявність у lock на Linux нешкідлива | `03fff36`: safe-pysha3 прибрано з lock (+ коментар у шапці) | job `lock-install-windows`: `pip install -r requirements.lock` — саме той шлях, що ламався останнім |
+
+**Урок (спільний корінь):** усі три — наслідок того, що **CI не було, і єдина
+платформа перевірки — Linux**. Клас «працює в мене, падає в тебе» не ловиться
+одноплатформним прогоном, хай навіть 105 тестів зелені. Тому Задача 1 (CI з
+матрицею ubuntu+windows і чистим install з lock) — не косметика, а закриття
+саме цього класу.
 
 ## Пост-аудит: чотири перевірки автора (закриття)
 
