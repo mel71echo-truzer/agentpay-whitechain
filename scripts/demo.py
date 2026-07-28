@@ -313,7 +313,7 @@ def main() -> None:
     payload = agent_client.build_and_sign_authorization(
         agent_with_soul.key.hex(),
         config.FACILITATOR_WALLET_ADDRESS,
-        config.RESOURCE_PRICE_TEURC,
+        config.RESOURCE_PRICE_WEI,
         "/photo/kyiv-sofia-cathedral",
         config.TEURC_ADDRESS,
         w3.eth.chain_id,

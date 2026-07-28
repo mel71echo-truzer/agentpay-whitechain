@@ -5,7 +5,8 @@
 хардкоду конкретного сервісу в клієнті. Ончейн-реєстр можливостей — Roadmap
 (Phase 3).
 
-Модель запису: {id, capability_type, provider_url, price, min_reputation_tier, active}.
+Модель запису: {id, capability_type, provider_url, price_wei, min_reputation_tier, active}.
+Ціна — int wei (метадані показу; сама оплата йде за 402, не за це поле).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ class CapabilityRegistry:
             "id": record["id"],
             "capability_type": record["capability_type"],
             "provider_url": record["provider_url"],
-            "price": float(record.get("price", 0) or 0),
+            "price_wei": int(record.get("price_wei", 0) or 0),
             "min_reputation_tier": int(record.get("min_reputation_tier", 0) or 0),
             "active": bool(record.get("active", True)),
         }

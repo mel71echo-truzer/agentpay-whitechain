@@ -101,7 +101,7 @@ class Store:
                     id TEXT PRIMARY KEY,
                     capability_type TEXT NOT NULL,
                     provider_url TEXT NOT NULL,
-                    price REAL NOT NULL DEFAULT 0,
+                    price_wei INTEGER NOT NULL DEFAULT 0,
                     min_reputation_tier INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1
                 );
@@ -197,12 +197,12 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO capabilities (id, capability_type, provider_url, price, min_reputation_tier, active)
-                VALUES (:id, :capability_type, :provider_url, :price, :min_reputation_tier, :active)
+                INSERT INTO capabilities (id, capability_type, provider_url, price_wei, min_reputation_tier, active)
+                VALUES (:id, :capability_type, :provider_url, :price_wei, :min_reputation_tier, :active)
                 ON CONFLICT(id) DO UPDATE SET
                     capability_type=excluded.capability_type,
                     provider_url=excluded.provider_url,
-                    price=excluded.price,
+                    price_wei=excluded.price_wei,
                     min_reputation_tier=excluded.min_reputation_tier,
                     active=excluded.active
                 """,
@@ -210,7 +210,7 @@ class Store:
                     "id": record["id"],
                     "capability_type": record["capability_type"],
                     "provider_url": record["provider_url"],
-                    "price": record.get("price", 0),
+                    "price_wei": int(record.get("price_wei", 0) or 0),
                     "min_reputation_tier": record.get("min_reputation_tier", 0),
                     "active": 1 if record.get("active", True) else 0,
                 },

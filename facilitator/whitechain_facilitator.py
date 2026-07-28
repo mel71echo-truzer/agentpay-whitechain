@@ -31,6 +31,7 @@ from web3 import Web3
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import chain  # noqa: E402
 import config  # noqa: E402
+import money  # noqa: E402
 from facilitator import events as events_mod  # noqa: E402
 from facilitator import identity as identity_mod  # noqa: E402
 from facilitator import policy as policy_mod  # noqa: E402
@@ -114,11 +115,13 @@ class WhitechainFacilitator:
         authorization: dict,
         resource: str,
         resource_salt: str,
-        price_teurc: float,
+        price_wei: int,
         min_reputation_tier: int = 0,
     ) -> dict:
         """Оркеструє повний цикл: identity -> policy -> payment -> settlement
-        -> event -> response. Сигнатура і ключі результату — як у Фазі 1.
+        -> event -> response. Гроші — int wei (рішення №4): price_wei приходить
+        уже сконвертованим на межі (config/money), у цьому шляху float немає.
+        Відповідь несе авторитетні *_wei (int) + людські *_teurc (рядок).
         """
         from_addr = Web3.to_checksum_address(authorization["from"])
         emitted: list[dict] = []
@@ -133,13 +136,13 @@ class WhitechainFacilitator:
 
         # 2. Policy (KYA + reputation gate).
         decision = policy_mod.check_policy(
-            agent_identity, {"min_reputation_tier": min_reputation_tier, "price_teurc": price_teurc}
+            agent_identity, {"min_reputation_tier": min_reputation_tier, "price_wei": price_wei}
         )
         if not decision["allow"]:
             return self._deny(decision["reason"], agent_identity, emitted)
 
         # 3. Payment (офчейн EIP-712/EIP-3009 валідація).
-        validation = self.payment.validate_authorization(authorization, resource, resource_salt, price_teurc)
+        validation = self.payment.validate_authorization(authorization, resource, resource_salt, price_wei)
         if not validation["ok"]:
             return self._deny(validation["reason"], agent_identity, emitted)
         emit(events_mod.AUTHORIZATION_VALIDATED)
@@ -181,16 +184,21 @@ class WhitechainFacilitator:
         # SettlementConfirmed, якщо WAIT_FOR_CONFIRMATION=true).
         emit(events_mod.ACCESS_GRANTED, tx_hash=result["relay_tx_hash"])
 
-        scale = 10**config.TEURC_DECIMALS
+        dec = config.TEURC_DECIMALS
+        amount_wei = validation["message"]["value"]
         return {
             "valid": True,
             "reason": "Оплату прийнято офчейн; розрахунок проведено.",
             "reputation_tier": agent_identity["reputation_tier"],
             "reputation_score": agent_identity["reputation_score"],
             "soul_id": agent_identity["soul_id"],
-            "amount_teurc": validation["message"]["value"] / scale,
-            "fee_teurc": result["fee_wei"] / scale,
-            "net_to_service_provider_teurc": result["net_wei"] / scale,
+            # Авторитетні суми — int wei; людські *_teurc — рядок (без float).
+            "amount_wei": amount_wei,
+            "fee_wei": result["fee_wei"],
+            "net_wei": result["net_wei"],
+            "amount_teurc": money.wei_to_teurc_str(amount_wei, dec),
+            "fee_teurc": money.wei_to_teurc_str(result["fee_wei"], dec),
+            "net_to_service_provider_teurc": money.wei_to_teurc_str(result["net_wei"], dec),
             "relay_tx_hash": result["relay_tx_hash"],
             "forward_tx_hash": result["forward_tx_hash"],
             "settlement_status": result["status"],

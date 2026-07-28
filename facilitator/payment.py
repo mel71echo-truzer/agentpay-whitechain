@@ -61,7 +61,7 @@ class PaymentValidator:
             "verifyingContract": self.teurc.address,
         }
 
-    def validate_authorization(self, authorization: dict, resource: str, resource_salt: str, price_teurc: float) -> dict:
+    def validate_authorization(self, authorization: dict, resource: str, resource_salt: str, price_wei: int) -> dict:
         from_addr = Web3.to_checksum_address(authorization["from"])
 
         # 1. resource binding.
@@ -114,7 +114,7 @@ class PaymentValidator:
         # 5. Отримувач + сума.
         if message["to"].lower() != self.facilitator_address.lower():
             return {"ok": False, "reason": "Авторизація призначена не на адресу facilitator-а.", "message": None}
-        price_wei = round(price_teurc * (10**self.teurc_decimals))
+        # price_wei приходить уже як int wei (конверсія — на межі, config/money).
         if message["value"] < price_wei:
             return {
                 "ok": False,

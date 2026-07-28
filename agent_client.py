@@ -83,46 +83,48 @@ def resolve_provider_url(registry_url: str, capability_type: str) -> str:
 
 
 class SpendLedger:
-    """Веде облік, скільки Автор уже витратив (у tEURC) у межах завдання.
+    """Веде облік, скільки Автор уже витратив (у wei) у межах завдання.
 
-    Зберігається в JSON-файлі (config.SPEND_LEDGER_PATH), щоб ліміт
-    зберігався навіть якщо процес перезапустити всередині одного завдання.
+    Гроші — int wei (рішення №4): жодного float у лічильнику, точний ліміт без
+    накопичувального дрейфу. Зберігається в JSON-файлі (config.SPEND_LEDGER_PATH),
+    щоб ліміт переживав перезапуск процесу всередині одного завдання.
     """
 
-    def __init__(self, path: str | None = None, max_spend_teurc: float | None = None):
+    def __init__(self, path: str | None = None, max_spend_wei: int | None = None):
         self.path = Path(path or config.SPEND_LEDGER_PATH)
-        self.max_spend_teurc = (
-            max_spend_teurc if max_spend_teurc is not None else config.AUTHOR_MAX_SPEND_TEURC
+        self.max_spend_wei = (
+            max_spend_wei if max_spend_wei is not None else config.AUTHOR_MAX_SPEND_WEI
         )
         self._state = self._load()
 
     def _load(self) -> dict:
         if self.path.exists():
             return json.loads(self.path.read_text())
-        return {"spent_teurc": 0.0, "payments": []}
+        return {"spent_wei": 0, "payments": []}
 
     def _save(self) -> None:
         self.path.write_text(json.dumps(self._state, indent=2))
 
     def reset(self) -> None:
         """Скидає лічильник — виклич на початку нового завдання."""
-        self._state = {"spent_teurc": 0.0, "payments": []}
+        self._state = {"spent_wei": 0, "payments": []}
         self._save()
 
     @property
-    def spent_teurc(self) -> float:
-        return self._state["spent_teurc"]
+    def spent_wei(self) -> int:
+        return self._state["spent_wei"]
 
-    def ensure_can_spend(self, amount_teurc: float) -> None:
-        if self.spent_teurc + amount_teurc > self.max_spend_teurc + 1e-12:
+    def ensure_can_spend(self, amount_wei: int) -> None:
+        # Ціла арифметика — точне порівняння, без float-епсилону.
+        if self.spent_wei + amount_wei > self.max_spend_wei:
             raise SpendLimitExceeded(
-                f"Ліміт вичерпано: вже витрачено {self.spent_teurc} tEURC, "
-                f"ще {amount_teurc} tEURC перевищить максимум {self.max_spend_teurc} tEURC на завдання."
+                f"Ліміт вичерпано: вже витрачено {self.spent_wei} wei, "
+                f"ще {amount_wei} wei перевищить максимум {self.max_spend_wei} wei на завдання."
             )
 
-    def record(self, amount_teurc: float, to: str, relay_tx_hash: str | None) -> None:
-        self._state["spent_teurc"] += amount_teurc
-        self._state["payments"].append({"amount_teurc": amount_teurc, "to": to, "relay_tx_hash": relay_tx_hash})
+    def record(self, amount_wei: int, to: str, relay_tx_hash: str | None) -> None:
+        self._state["spent_wei"] += amount_wei
+        self._state["payments"].append({"amount_wei": amount_wei, "to": to, "relay_tx_hash": relay_tx_hash})
         self._save()
 
 
@@ -132,7 +134,7 @@ class PurchaseResult:
     content_type: str
     already_had_it: bool = False
     reputation_tier: int | None = None
-    fee_teurc: float | None = None
+    fee_teurc: str | None = None  # людський рядок (B3), лише для показу
     relay_tx_hash: str | None = None
     forward_tx_hash: str | None = None
     log: list[str] | None = None
@@ -141,7 +143,7 @@ class PurchaseResult:
 def build_and_sign_authorization(
     private_key: str,
     to_address: str,
-    value_teurc: float,
+    value_wei: int,
     resource: str,
     teurc_address: str,
     chain_id: int,
@@ -157,7 +159,8 @@ def build_and_sign_authorization(
     nonce = Web3.keccak(resource.encode("utf-8") + salt)
 
     now = int(time.time())
-    value_wei = round(value_teurc * (10**config.TEURC_DECIMALS))
+    # value_wei — уже int wei (конверсія на межі виклику). Валідуємо тип.
+    value_wei = int(value_wei)
 
     message = {
         "from": account.address,
@@ -224,19 +227,20 @@ def pay_and_fetch(
     requirements = response.json()
     accept = requirements["accepts"][0]
     pay_to = accept["payTo"]
-    price_teurc = accept["price_teurc"]
+    # Авторитетна сума з 402 — int wei (B3). price_teurc лишається для показу.
+    price_wei = int(accept["price_wei"])
     resource = accept["resource"]
     teurc_address = accept["asset_address"]
 
-    log.append(f"Сервер просить {price_teurc} tEURC на {pay_to} за {resource}")
+    log.append(f"Сервер просить {accept.get('price_teurc')} tEURC ({price_wei} wei) на {pay_to} за {resource}")
 
     if ledger is not None:
-        ledger.ensure_can_spend(price_teurc)
+        ledger.ensure_can_spend(price_wei)
 
     payload = build_and_sign_authorization(
         private_key,
         pay_to,
-        price_teurc,
+        price_wei,
         resource,
         teurc_address,
         chain_id if chain_id is not None else config.CHAIN_ID,

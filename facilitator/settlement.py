@@ -116,6 +116,12 @@ class SettlementEngine:
                 raise SettlementRelayError(f"Релей транзакції {relay_tx_hash} відкотився (status != 1).")
             confirmed = True
 
+        # Гроші — int wei; розподіл цілочисловий (рішення №4).
+        # РІШЕННЯ: залишок від floor-ділення комісії дістається СЕРВІСУ, не
+        # facilitator-у. fee_wei округлюється ВНИЗ (floor), а net = value - fee,
+        # тож будь-який суб-bps залишок опиняється в net (у сервіса). Це свідомий
+        # вибір на користь продавця, а не побічний ефект округлення.
+        # Інваріант: fee_wei + net_wei == value точно (нічого не «зникає»).
         fee_wei = (value * self.fee_bps) // 10_000
         net_wei = value - fee_wei
 

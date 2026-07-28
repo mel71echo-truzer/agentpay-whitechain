@@ -130,7 +130,7 @@ def test_engine_happy_path_confirmed(patched_send):
 
 def _sign(fx, agent, resource):
     return agent_client.build_and_sign_authorization(
-        agent.key.hex(), fx.facilitator_acct.address, fx.price_teurc, resource, fx.teurc.address, fx.w3.eth.chain_id
+        agent.key.hex(), fx.facilitator_acct.address, fx.price_wei, resource, fx.teurc.address, fx.w3.eth.chain_id
     )
 
 
@@ -146,7 +146,7 @@ def test_partial_failure_holds_funds_and_denies_access(facilitator_setup, monkey
     monkeypatch.setattr(fx.facilitator.settlement, "settle", forward_failed)
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     # Доступу немає.
@@ -175,7 +175,7 @@ def test_clean_relay_failure_is_distinct_from_held(facilitator_setup, monkeypatc
     monkeypatch.setattr(fx.facilitator.settlement, "settle", relay_failed)
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is False

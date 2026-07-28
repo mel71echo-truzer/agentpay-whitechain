@@ -26,14 +26,14 @@ from web3 import Web3  # noqa: E402
 import agent_client  # noqa: E402
 
 
-def _sign(fixture, agent, resource, value_teurc=None, valid_after=0, valid_before_delta=300):
+def _sign(fixture, agent, resource, value_wei=None, valid_after=0, valid_before_delta=300):
     """Будує authorization вручну (не через agent_client) коли треба
     підсунути нетипові поля (протермінований підпис тощо)."""
-    value_teurc = fixture.price_teurc if value_teurc is None else value_teurc
+    value_wei = fixture.price_wei if value_wei is None else value_wei
     return agent_client.build_and_sign_authorization(
         agent.key.hex(),
         fixture.facilitator_acct.address,
-        value_teurc,
+        value_wei,
         resource,
         fixture.teurc.address,
         fixture.w3.eth.chain_id,
@@ -45,7 +45,7 @@ def test_no_soul_rejected(facilitator_setup):
     payload = _sign(fx, fx.unverified_agent, "/photo/kyiv-lavra")
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is False
@@ -59,7 +59,7 @@ def test_verified_agent_success_and_fee_accounting(facilitator_setup):
     balance_before_agent = fx.teurc.functions.balanceOf(fx.verified_no_sbt_agent.address).call()
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is True
@@ -67,10 +67,14 @@ def test_verified_agent_success_and_fee_accounting(facilitator_setup):
     assert result["relay_tx_hash"] is not None
     assert result["forward_tx_hash"] is not None
 
-    price_wei = round(fx.price_teurc * 10**6)
+    price_wei = fx.price_wei
     expected_fee_wei = (price_wei * config_fee_bps()) // 10_000
-    assert round(result["fee_teurc"] * 10**6) == expected_fee_wei
-    assert round(result["net_to_service_provider_teurc"] * 10**6) == price_wei - expected_fee_wei
+    # Авторитетні суми — int wei (B3), звіряємо їх напряму.
+    assert result["fee_wei"] == expected_fee_wei
+    assert result["net_wei"] == price_wei - expected_fee_wei
+    # Людські рядки узгоджені з wei.
+    import money as _money
+    assert result["fee_teurc"] == _money.wei_to_teurc_str(expected_fee_wei, 6)
 
     balance_after_agent = fx.teurc.functions.balanceOf(fx.verified_no_sbt_agent.address).call()
     assert balance_before_agent - balance_after_agent == price_wei
@@ -90,13 +94,13 @@ def config_fee_bps():
 
 def test_insufficient_reputation_rejected_on_premium(facilitator_setup):
     fx = facilitator_setup
-    payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-motherland-monument", value_teurc=fx.premium_price_teurc)
+    payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-motherland-monument", value_wei=fx.premium_price_wei)
 
     result = fx.facilitator.verify_and_settle(
         payload["authorization"],
         payload["resource"],
         payload["resource_salt"],
-        fx.premium_price_teurc,
+        fx.premium_price_wei,
         min_reputation_tier=fx.premium_min_reputation_tier,
     )
 
@@ -107,13 +111,13 @@ def test_insufficient_reputation_rejected_on_premium(facilitator_setup):
 
 def test_verified_agent_with_sbt_can_access_premium(facilitator_setup):
     fx = facilitator_setup
-    payload = _sign(fx, fx.verified_agent, "/photo/kyiv-motherland-monument", value_teurc=fx.premium_price_teurc)
+    payload = _sign(fx, fx.verified_agent, "/photo/kyiv-motherland-monument", value_wei=fx.premium_price_wei)
 
     result = fx.facilitator.verify_and_settle(
         payload["authorization"],
         payload["resource"],
         payload["resource_salt"],
-        fx.premium_price_teurc,
+        fx.premium_price_wei,
         min_reputation_tier=fx.premium_min_reputation_tier,
     )
 
@@ -130,7 +134,7 @@ def test_forged_signature_rejected(facilitator_setup):
     forged = dict(payload["authorization"])
     forged["from"] = fx.verified_no_sbt_agent.address  # claims to be a real verified agent
 
-    result = fx.facilitator.verify_and_settle(forged, payload["resource"], payload["resource_salt"], fx.price_teurc)
+    result = fx.facilitator.verify_and_settle(forged, payload["resource"], payload["resource_salt"], fx.price_wei)
 
     assert result["valid"] is False
     assert "підпис" in result["reason"].lower() or "signature" in result["reason"].lower()
@@ -150,7 +154,7 @@ def test_expired_authorization_rejected(facilitator_setup):
     message = {
         "from": account.address,
         "to": fx.facilitator_acct.address,
-        "value": round(fx.price_teurc * 10**6),
+        "value": fx.price_wei,
         "validAfter": 0,
         "validBefore": now - 10,  # вже протерміновано
         "nonce": nonce,
@@ -177,7 +181,7 @@ def test_expired_authorization_rejected(facilitator_setup):
         "s": Web3.to_hex(signed.s.to_bytes(32, "big")),
     }
 
-    result = fx.facilitator.verify_and_settle(authorization, resource, "0x" + salt.hex(), fx.price_teurc)
+    result = fx.facilitator.verify_and_settle(authorization, resource, "0x" + salt.hex(), fx.price_wei)
 
     assert result["valid"] is False
     assert "протерм" in result["reason"] or "expired" in result["reason"].lower()
@@ -188,12 +192,12 @@ def test_nonce_replay_rejected(facilitator_setup):
     payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra")
 
     first = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
     assert first["valid"] is True
 
     second = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
     assert second["valid"] is False
     assert "replay" in second["reason"].lower() or "використ" in second["reason"].lower()
@@ -207,7 +211,7 @@ def test_resource_binding_mismatch_rejected(facilitator_setup):
         payload["authorization"],
         "/photo/kyiv-sofia-cathedral",  # інший ресурс, ніж підписано
         payload["resource_salt"],
-        fx.price_teurc,
+        fx.price_wei,
     )
 
     assert result["valid"] is False
@@ -217,10 +221,10 @@ def test_resource_binding_mismatch_rejected(facilitator_setup):
 def test_underpayment_rejected(facilitator_setup):
     fx = facilitator_setup
     # Підписує authorization на суму МЕНШУ за очікувану ціну ресурсу.
-    payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra", value_teurc=0.01)
+    payload = _sign(fx, fx.verified_no_sbt_agent, "/photo/kyiv-lavra", value_wei=10_000)  # 0.01 < 0.02
 
     result = fx.facilitator.verify_and_settle(
-        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_teurc
+        payload["authorization"], payload["resource"], payload["resource_salt"], fx.price_wei
     )
 
     assert result["valid"] is False

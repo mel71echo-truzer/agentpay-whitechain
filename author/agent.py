@@ -136,7 +136,7 @@ class AuthorAgent:
                 article = "".join(
                     block.text for block in response.content if block.type == "text"
                 )
-                return {"article": article, "purchases": self.purchases, "spent_teurc": self.ledger.spent_teurc}
+                return {"article": article, "purchases": self.purchases, "spent_wei": self.ledger.spent_wei}
 
             tool_results = []
             for block in response.content:
@@ -158,4 +158,4 @@ if __name__ == "__main__":
     outcome = agent.run(task_text)
     print("\n=== Стаття ===")
     print(outcome["article"])
-    print(f"\nВитрачено: {outcome['spent_teurc']} tEURC, куплено фото: {len(outcome['purchases'])}")
+    print(f"\nВитрачено: {outcome['spent_wei']} wei, куплено фото: {len(outcome['purchases'])}")

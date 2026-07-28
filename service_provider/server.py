@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+import money  # noqa: E402
 from facilitator.capability import CapabilityRegistry  # noqa: E402
 from facilitator.whitechain_facilitator import WhitechainFacilitator  # noqa: E402
 
@@ -63,8 +64,9 @@ facilitator: WhitechainFacilitator | None = None
 # Ініціалізується разом із facilitator через init_facilitator().
 capability_registry: CapabilityRegistry | None = None
 
-# Стан AI Service Provider тримаємо в пам'яті процесу — для PoC-демо цього достатньо.
-_ledger = {"earned_teurc": 0.0, "sales": []}
+# Стан AI Service Provider тримаємо в пам'яті процесу — для PoC-демо цього
+# достатньо. Заробіток — int wei (рішення №4): без float-накопичення/дрейфу.
+_ledger = {"earned_wei": 0, "sales": []}
 
 
 def init_facilitator(fac: WhitechainFacilitator) -> None:
@@ -79,21 +81,25 @@ def init_facilitator(fac: WhitechainFacilitator) -> None:
             "id": "ai-service-provider-1",
             "capability_type": config.CAPABILITY_TYPE,
             "provider_url": config.SERVICE_PROVIDER_BASE_URL,
-            "price": config.RESOURCE_PRICE_TEURC,
+            "price_wei": config.RESOURCE_PRICE_WEI,
             "min_reputation_tier": 0,
             "active": True,
         }
     )
 
 
-def _price_and_tier_for(name: str) -> tuple[float, int]:
+def _price_and_tier_for(name: str) -> tuple[int, int]:
+    """Повертає (price_wei, min_reputation_tier). Ціна — int wei."""
     if name in PREMIUM_RESOURCE_NAMES:
-        return config.PREMIUM_RESOURCE_PRICE_TEURC, config.PREMIUM_MIN_REPUTATION_TIER
-    return config.RESOURCE_PRICE_TEURC, 0
+        return config.PREMIUM_RESOURCE_PRICE_WEI, config.PREMIUM_MIN_REPUTATION_TIER
+    return config.RESOURCE_PRICE_WEI, 0
 
 
-def _payment_requirements(resource_path: str, price_teurc: float, min_reputation_tier: int) -> dict:
-    """Формує x402 payment requirements — тіло 402-відповіді."""
+def _payment_requirements(resource_path: str, price_wei: int, min_reputation_tier: int) -> dict:
+    """Формує x402 payment requirements — тіло 402-відповіді.
+
+    B3: авторитетна ціна — int `price_wei`; `price_teurc` (рядок) лишається
+    для показу людині. Клієнт підписує суму саме за `price_wei`."""
     return {
         "x402Version": 1,
         "accepts": [
@@ -103,7 +109,8 @@ def _payment_requirements(resource_path: str, price_teurc: float, min_reputation
                 "payTo": config.FACILITATOR_WALLET_ADDRESS,
                 "asset": "tEURC",
                 "asset_address": config.TEURC_ADDRESS,
-                "price_teurc": price_teurc,
+                "price_wei": price_wei,
+                "price_teurc": money.wei_to_teurc_str(price_wei, config.TEURC_DECIMALS),
                 "resource": resource_path,
                 "min_reputation_tier": min_reputation_tier,
                 "description": f"Resource: {resource_path}",
@@ -149,9 +156,12 @@ async def registry_register(request: Request):
 def list_photos():
     """Список доступних фото, ціни і які з них преміум."""
     names = sorted(p.stem for p in IMAGES_DIR.glob("*.png"))
+    dec = config.TEURC_DECIMALS
     return {
-        "price_teurc": config.RESOURCE_PRICE_TEURC,
-        "premium_price_teurc": config.PREMIUM_RESOURCE_PRICE_TEURC,
+        "price_wei": config.RESOURCE_PRICE_WEI,
+        "price_teurc": money.wei_to_teurc_str(config.RESOURCE_PRICE_WEI, dec),
+        "premium_price_wei": config.PREMIUM_RESOURCE_PRICE_WEI,
+        "premium_price_teurc": money.wei_to_teurc_str(config.PREMIUM_RESOURCE_PRICE_WEI, dec),
         "premium_min_reputation_tier": config.PREMIUM_MIN_REPUTATION_TIER,
         "premium_resources": sorted(PREMIUM_RESOURCE_NAMES),
         "photos": names,
@@ -163,7 +173,8 @@ def balance():
     """Скільки AI Service Provider заробив (нетто, після комісії facilitator-а)."""
     return {
         "address": config.SERVICE_PROVIDER_WALLET_ADDRESS,
-        "earned_teurc": round(_ledger["earned_teurc"], 6),
+        "earned_wei": _ledger["earned_wei"],
+        "earned_teurc": money.wei_to_teurc_str(_ledger["earned_wei"], config.TEURC_DECIMALS),
         "sales_count": len(_ledger["sales"]),
         "sales": _ledger["sales"],
     }
@@ -238,10 +249,13 @@ async def pay_for_photo(name: str, request: Request):
             },
         )
 
-    _ledger["earned_teurc"] += result["net_to_service_provider_teurc"]
+    # Заробіток рахуємо в int wei (авторитетне net_wei), без float-накопичення.
+    _ledger["earned_wei"] += result["net_wei"]
     _ledger["sales"].append(
         {
             "photo": name,
+            "amount_wei": result["amount_wei"],
+            "fee_wei": result["fee_wei"],
             "amount_teurc": result["amount_teurc"],
             "fee_teurc": result["fee_teurc"],
             "from": authorization["from"],

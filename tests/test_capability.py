@@ -18,11 +18,12 @@ def _registry():
 def test_resolve_returns_registered_provider():
     reg = _registry()
     reg.register(
-        {"id": "c1", "capability_type": "image-generation", "provider_url": "http://sp:8000", "price": 0.02}
+        {"id": "c1", "capability_type": "image-generation", "provider_url": "http://sp:8000", "price_wei": 20_000}
     )
     resolved = reg.resolve("image-generation")
     assert resolved["provider_url"] == "http://sp:8000"
     assert resolved["capability_type"] == "image-generation"
+    assert resolved["price_wei"] == 20_000
 
 
 def test_resolve_unknown_type_raises():
