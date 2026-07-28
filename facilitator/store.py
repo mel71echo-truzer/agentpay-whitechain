@@ -23,7 +23,9 @@ from pathlib import Path
 # файл БД не відкривався мовчки й не падав пізніше на першому несумісному записі.
 #   1 — початкова схема Фази 2 (capabilities.price REAL).
 #   2 — money-type міграція: capabilities.price -> price_wei INTEGER (09b3a4c).
-CURRENT_SCHEMA_VERSION = 2
+#   3 — підписана реєстрація (F4 #A): capabilities += owner_address, pay_to,
+#       signature, created_at; вибір провайдера за серверним created_at/rowid.
+CURRENT_SCHEMA_VERSION = 3
 
 
 class StoreLockError(RuntimeError):
@@ -144,9 +146,13 @@ class Store:
                     id TEXT PRIMARY KEY,
                     capability_type TEXT NOT NULL,
                     provider_url TEXT NOT NULL,
+                    pay_to TEXT NOT NULL DEFAULT '',
+                    owner_address TEXT NOT NULL DEFAULT '',
                     price_wei INTEGER NOT NULL DEFAULT 0,
                     min_reputation_tier INTEGER NOT NULL DEFAULT 0,
-                    active INTEGER NOT NULL DEFAULT 1
+                    active INTEGER NOT NULL DEFAULT 1,
+                    signature TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -238,24 +244,37 @@ class Store:
 
     def upsert_capability(self, record: dict) -> None:
         with self._lock, self._conn:
+            # created_at ставимо ЛИШЕ на першому вставленні; при оновленні запису
+            # зберігаємо оригінальний час реєстрації (порядок вибору стабільний).
             self._conn.execute(
                 """
-                INSERT INTO capabilities (id, capability_type, provider_url, price_wei, min_reputation_tier, active)
-                VALUES (:id, :capability_type, :provider_url, :price_wei, :min_reputation_tier, :active)
+                INSERT INTO capabilities
+                    (id, capability_type, provider_url, pay_to, owner_address,
+                     price_wei, min_reputation_tier, active, signature, created_at)
+                VALUES
+                    (:id, :capability_type, :provider_url, :pay_to, :owner_address,
+                     :price_wei, :min_reputation_tier, :active, :signature, :created_at)
                 ON CONFLICT(id) DO UPDATE SET
                     capability_type=excluded.capability_type,
                     provider_url=excluded.provider_url,
+                    pay_to=excluded.pay_to,
+                    owner_address=excluded.owner_address,
                     price_wei=excluded.price_wei,
                     min_reputation_tier=excluded.min_reputation_tier,
-                    active=excluded.active
+                    active=excluded.active,
+                    signature=excluded.signature
                 """,
                 {
                     "id": record["id"],
                     "capability_type": record["capability_type"],
                     "provider_url": record["provider_url"],
+                    "pay_to": record.get("pay_to", ""),
+                    "owner_address": record.get("owner_address", ""),
                     "price_wei": int(record.get("price_wei", 0) or 0),
                     "min_reputation_tier": record.get("min_reputation_tier", 0),
                     "active": 1 if record.get("active", True) else 0,
+                    "signature": record.get("signature", ""),
+                    "created_at": time.time(),
                 },
             )
 
@@ -269,7 +288,10 @@ class Store:
             conditions.append("active = 1")
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY id"
+        # Порядок — за СЕРВЕРНИМИ значеннями (created_at, потім rowid як tie-break),
+        # НЕ за жодним полем, що його контролює реєстрант (напр. id/адреса, яку
+        # можна грайндити вибором vanity-адреси). Див. registry_auth / F4 #A.
+        query += " ORDER BY created_at ASC, rowid ASC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         result = []

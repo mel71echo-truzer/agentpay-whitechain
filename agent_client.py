@@ -32,6 +32,7 @@ from web3 import Web3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import registry_auth  # noqa: E402
 
 TRANSFER_AUTH_TYPES = {
     "TransferWithAuthorization": [
@@ -70,16 +71,42 @@ def discover_capabilities(registry_url: str, capability_type: str | None = None)
     return resp.json().get("capabilities", [])
 
 
-def resolve_provider_url(registry_url: str, capability_type: str) -> str:
-    """Знаходить provider_url для типу можливості через реєстр (не хардкод).
+def verify_capability_record(record: dict) -> str:
+    """Перевіряє підпис запису discovery (F4 #A): підпис валідний і owner==id.
+    Повертає owner (checksummed) або кидає ValueError. Агент НЕ бере запис із
+    discovery на віру — сам звіряє підпис, а не покладається лише на реєстр."""
+    return registry_auth.verify_registration(record, record.get("signature", ""))
 
-    Це і є суть Компонента 2: агент НЕ знає адресу сервісу заздалегідь —
-    він її резолвить за capability_type.
-    """
+
+def resolve_capability(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> dict:
+    """Резолвить ПЕРЕВІРЕНИЙ запис можливості через реєстр.
+
+    Reєстр повертає всі збіги в серверному порядку (не контрольованому
+    реєстрантом). Агент відкидає записи з невалідним підписом, а вибір робить
+    ЯВНО: якщо задано prefer_owner (напр. allowlist довірених провайдерів) —
+    бере саме його; інакше — перший перевірений. Це не «сліпий matches[0]»:
+    невалідні відсіяно, а критерій вибору — рішення викликача."""
     caps = discover_capabilities(registry_url, capability_type)
-    if not caps:
-        raise CapabilityNotFound(f"Реєстр не має активного провайдера типу '{capability_type}'.")
-    return caps[0]["provider_url"]
+    verified = []
+    for c in caps:
+        try:
+            verify_capability_record(c)
+        except (ValueError, KeyError):
+            continue  # непідписаний/підроблений запис ігноруємо
+        verified.append(c)
+    if not verified:
+        raise CapabilityNotFound(f"Реєстр не має ПЕРЕВІРЕНОГО провайдера типу '{capability_type}'.")
+    if prefer_owner is not None:
+        for c in verified:
+            if str(c.get("id", "")).lower() == prefer_owner.lower():
+                return c
+        raise CapabilityNotFound(f"Немає перевіреного провайдера з owner={prefer_owner}.")
+    return verified[0]
+
+
+def resolve_provider_url(registry_url: str, capability_type: str, *, prefer_owner: str | None = None) -> str:
+    """provider_url перевіреного провайдера (тонка обгортка resolve_capability)."""
+    return resolve_capability(registry_url, capability_type, prefer_owner=prefer_owner)["provider_url"]
 
 
 class SpendLedger:
@@ -201,12 +228,18 @@ def pay_and_fetch(
     private_key: str | None = None,
     ledger=None,
     chain_id: int | None = None,
+    expected_pay_to: str | None = None,
 ) -> PurchaseResult:
     """GET url; якщо 402 — підписує authorization офчейн і повторює запит.
 
     ledger — необов'язковий SpendLedger (див. author/agent.py) для
     перевірки ліміту витрат ПЕРЕД підписом (підпис ще не витрачає нічого
     сам собою, але немає сенсу підписувати те, що ліміт однаково відхилить).
+
+    expected_pay_to — якщо передано (з ПІДПИСАНОГО запису реєстру), звіряємо
+    його з `payTo` із 402: розбіжність = HARD-FAIL, відмова платити (F4 #A).
+    Так агент не підписує авторизацію на адресу, якої немає в підписаному
+    записі провайдера — навіть якщо provider_url скомпрометовано.
     """
     private_key = private_key or config.AUTHOR_WALLET_PRIVATE_KEY
     log: list[str] = []
@@ -227,6 +260,12 @@ def pay_and_fetch(
     requirements = response.json()
     accept = requirements["accepts"][0]
     pay_to = accept["payTo"]
+    # HARD-FAIL: payTo з 402 мусить збігтися з підписаним записом реєстру (F4 #A).
+    if expected_pay_to is not None and str(pay_to).lower() != expected_pay_to.lower():
+        raise PaymentFailed(
+            f"payTo із 402 ({pay_to}) не збігається з підписаним записом реєстру "
+            f"({expected_pay_to}) — відмова платити (можлива підміна provider_url)."
+        )
     # Авторитетна сума з 402 — int wei (B3). price_teurc лишається для показу.
     price_wei = int(accept["price_wei"])
     resource = accept["resource"]

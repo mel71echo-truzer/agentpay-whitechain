@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, JSONResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 import money  # noqa: E402
+import registry_auth  # noqa: E402
 from facilitator.capability import CapabilityRegistry  # noqa: E402
 from facilitator.whitechain_facilitator import WhitechainFacilitator  # noqa: E402
 
@@ -76,16 +77,20 @@ def init_facilitator(fac: WhitechainFacilitator) -> None:
     global facilitator, capability_registry
     facilitator = fac
     capability_registry = CapabilityRegistry(fac.store)
-    capability_registry.register(
-        {
-            "id": "ai-service-provider-1",
-            "capability_type": config.CAPABILITY_TYPE,
-            "provider_url": config.SERVICE_PROVIDER_BASE_URL,
-            "price_wei": config.RESOURCE_PRICE_WEI,
-            "min_reputation_tier": 0,
-            "active": True,
-        }
-    )
+    # Провайдер сам підписує свій запис реєстру (F4 #A): id == його адреса,
+    # pay_to == адреса facilitator-а (куди реально йдуть кошти). Без ключа
+    # провайдера цей запис не зареєструвати й не підмінити.
+    record = {
+        "id": config.SERVICE_PROVIDER_WALLET_ADDRESS,
+        "capability_type": config.CAPABILITY_TYPE,
+        "provider_url": config.SERVICE_PROVIDER_BASE_URL,
+        "pay_to": config.FACILITATOR_WALLET_ADDRESS,
+        "price_wei": config.RESOURCE_PRICE_WEI,
+        "min_reputation_tier": 0,
+        "active": True,
+    }
+    signature = registry_auth.sign_registration(record, config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY)
+    capability_registry.register(record, signature)
 
 
 def _price_and_tier_for(name: str) -> tuple[int, int]:
@@ -136,17 +141,24 @@ def registry_capabilities(type: str | None = None):
 
 @app.post("/registry/register")
 async def registry_register(request: Request):
-    """Провайдер публікує можливість: {id, capability_type, provider_url, price, min_reputation_tier, active}."""
+    """Провайдер публікує ПІДПИСАНУ можливість (F4 #A):
+    {id, capability_type, provider_url, pay_to, price_wei, min_reputation_tier,
+     active, signature}. Підпис (ключем провайдера) обов'язковий; `id` мусить
+    дорівнювати адресі підписанта. Без валідного підпису — 400."""
     if capability_registry is None:
         return JSONResponse(status_code=503, content={"error": "Реєстр ще не ініціалізований."})
     raw_body = await request.body()
     if len(raw_body) > _MAX_BODY_FIELD_LEN:
         return JSONResponse(status_code=400, content={"error": "Тіло запиту завелике."})
     try:
-        record = json.loads(raw_body)
-        normalized = capability_registry.register(record)
-    except (ValueError, TypeError) as exc:
-        return JSONResponse(status_code=400, content={"error": f"Некоректний запис можливості: {exc}"})
+        body = json.loads(raw_body)
+        if not isinstance(body, dict):
+            raise ValueError("тіло має бути об'єктом")
+        signature = body.get("signature")
+        record = {k: v for k, v in body.items() if k != "signature"}
+        normalized = capability_registry.register(record, signature)
+    except (ValueError, TypeError, KeyError) as exc:
+        return JSONResponse(status_code=400, content={"error": f"Некоректний/непідписаний запис: {exc}"})
     except Exception:  # noqa: BLE001 — недовірений вхід; ніколи не 500
         return JSONResponse(status_code=400, content={"error": "Не вдалося зареєструвати можливість."})
     return {"registered": normalized}

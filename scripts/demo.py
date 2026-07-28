@@ -107,6 +107,7 @@ def setup_local_chain() -> str:
     config.FACILITATOR_WALLET_ADDRESS = facilitator_acct.address
     config.FACILITATOR_WALLET_PRIVATE_KEY = facilitator_acct.key.hex()
     config.SERVICE_PROVIDER_WALLET_ADDRESS = service_provider_acct.address
+    config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY = service_provider_acct.key.hex()  # для підпису запису реєстру (F4 #A)
     config.CHAIN_ID = w3.eth.chain_id
     config.SERVICE_PROVIDER_BASE_URL = f"http://{config.SERVICE_PROVIDER_HOST}:{config.SERVICE_PROVIDER_PORT}"
 
@@ -246,13 +247,20 @@ def main() -> None:
 
     console.print("\n[bold]Крок 5 — Service discovery через Capability Registry[/bold]")
     caps = agent_client.discover_capabilities(config.SERVICE_PROVIDER_BASE_URL, config.CAPABILITY_TYPE)
-    provider_url = agent_client.resolve_provider_url(config.SERVICE_PROVIDER_BASE_URL, config.CAPABILITY_TYPE)
+    # Агент бере ПЕРЕВІРЕНИЙ запис (підпис провайдера) і закріплює expected_pay_to:
+    # далі кожен платіж звіряє payTo з 402 із цим підписаним pay_to (F4 #A).
+    cap = agent_client.resolve_capability(config.SERVICE_PROVIDER_BASE_URL, config.CAPABILITY_TYPE)
+    provider_url = cap["provider_url"]
+    expected_pay_to = cap["pay_to"]
     _ok(f"агент знайшов сервіс через реєстр (не хардкод): type='{config.CAPABILITY_TYPE}' -> {provider_url}")
-    console.print(f"  Активних можливостей у реєстрі: {len(caps)}")
+    console.print(
+        f"  Активних можливостей у реєстрі: {len(caps)}; підпис перевірено, "
+        f"owner={cap['owner_address'][:10]}…, pay_to закріплено={expected_pay_to[:10]}…"
+    )
 
     console.print("\n[bold]Крок 6 — агент БЕЗ Soul намагається купити фото[/bold]")
     try:
-        agent_client.pay_and_fetch(f"{provider_url}/photo/kyiv-lavra", private_key=agent_no_soul.key.hex())
+        agent_client.pay_and_fetch(f"{provider_url}/photo/kyiv-lavra", private_key=agent_no_soul.key.hex(), expected_pay_to=expected_pay_to)
         _fail_step("агент без Soul НЕ мав отримати фото")
     except agent_client.PaymentFailed as exc:
         if "KYA" in str(exc) or "Soul" in str(exc):
@@ -264,7 +272,7 @@ def main() -> None:
     # Свіжий агент: немає ні SBT, ні поведінкової історії -> tier 0 -> відмова.
     try:
         agent_client.pay_and_fetch(
-            f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_with_soul.key.hex()
+            f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_with_soul.key.hex(), expected_pay_to=expected_pay_to
         )
         _fail_step("агент без потрібного tier НЕ мав отримати преміум-фото")
     except agent_client.PaymentFailed as exc:
@@ -274,7 +282,7 @@ def main() -> None:
             _fail_step(f"відхилено з неочікуваної причини: {exc}")
 
     console.print("\n[bold]Крок 8 — той самий агент купує звичайне фото[/bold]")
-    result = agent_client.pay_and_fetch(f"{provider_url}/photo/kyiv-lavra", private_key=agent_with_soul.key.hex())
+    result = agent_client.pay_and_fetch(f"{provider_url}/photo/kyiv-lavra", private_key=agent_with_soul.key.hex(), expected_pay_to=expected_pay_to)
     _ok("агент із Soul — офчейн-підпис прийнято; ресурс видано на SettlementConfirmed")
     _ok(
         f"контент видано ({len(result.content)} байт), комісія {result.fee_teurc} tEURC "
@@ -283,7 +291,7 @@ def main() -> None:
 
     console.print("\n[bold]Крок 9 — агент із Soul І SBT купує те саме преміум-фото[/bold]")
     premium_result = agent_client.pay_and_fetch(
-        f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_with_soul_and_sbt.key.hex()
+        f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_with_soul_and_sbt.key.hex(), expected_pay_to=expected_pay_to
     )
     _ok(f"преміум-ресурс видано (attested SBT tier={premium_result.reputation_tier})")
 
@@ -295,12 +303,12 @@ def main() -> None:
         f"flagged: score={flag_ident['reputation_score']} tier={flag_ident['reputation_tier']}"
     )
     vet_res = agent_client.pay_and_fetch(
-        f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_veteran.key.hex()
+        f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_veteran.key.hex(), expected_pay_to=expected_pay_to
     )
     _ok(f"veteran (tier {vet_ident['reputation_tier']} за формулою, БЕЗ SBT) — преміум видано")
     try:
         agent_client.pay_and_fetch(
-            f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_flagged.key.hex()
+            f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_flagged.key.hex(), expected_pay_to=expected_pay_to
         )
         _fail_step("flagged-агент НЕ мав отримати преміум")
     except agent_client.PaymentFailed as exc:
