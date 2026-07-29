@@ -8,6 +8,17 @@
 #     pip install -U -r requirements.txt -r requirements-dev.txt && \
 #     regenerate (див. docs/audit).
 #
+# ПЛАТФОРМОЗАЛЕЖНІ ПІНИ: знімок робиться на одній ОС, а дерево залежностей
+# залежить від платформи, тож «просто pip freeze» НЕ переносимий. Конкретно:
+#   - uvloop приходить від uvicorn[standard] лише на не-Windows і на Windows
+#     не існує взагалі -> пін без маркера ламав `pip install -r requirements.lock`
+#     (спіймано CI, джоба "clean install from requirements.lock (windows)");
+#   - pywin32, навпаки, потрібен web3 лише на Windows і в Linux-знімку відсутній
+#     (не фатально: pip домалює його як залежність сам).
+# Тому платформозалежні рядки мусять мати маркер (`; sys_platform != "win32"`).
+# Правильне рішення на майбутнє — генерувати lock інструментом, який сам
+# розставляє маркери (pip-compile / uv), а не `pip freeze`.
+#
 # requirements.txt лишається джерелом прямих залежностей (нижні межі >=);
 # цей файл — точний знімок усього дерева на момент аудиту.
 #
@@ -88,7 +99,7 @@ typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.6.3
 uvicorn==0.51.0
-uvloop==0.22.1
+uvloop==0.22.1; sys_platform != "win32"
 watchfiles==1.2.0
 web3==7.16.0
 websockets==15.0.1
