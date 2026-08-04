@@ -12,9 +12,18 @@ describe("AgentPayRouter Atomic Settlement", function () {
   beforeEach(async function () {
     [owner, seller, buyer] = await ethers.getSigners();
 
-    // Deploy Mock Soul Registry
+    // Deploy Mock Soul Registry. MockSoulRegistry's constructor requires an
+    // IsVerified attribute and an SBT collection — deploying it with no args
+    // (as before) threw "incorrect number of arguments to constructor", so this
+    // whole suite never ran. For the KYA-revert test below the buyer has no
+    // soul, so soulOf() short-circuits before isVerified() is consulted.
+    const isVerifiedAttr = await (await ethers.getContractFactory("MockSoulAttribute")).deploy();
+    const sbtCollection = await (await ethers.getContractFactory("MockSoulBoundTokenCollection")).deploy();
     const MockSoul = await ethers.getContractFactory("MockSoulRegistry");
-    mockSoulRegistry = await MockSoul.deploy();
+    mockSoulRegistry = await MockSoul.deploy(
+      await isVerifiedAttr.getAddress(),
+      await sbtCollection.getAddress(),
+    );
 
     // Deploy Mock tEURC Token
     const MockToken = await ethers.getContractFactory("tEURC");
