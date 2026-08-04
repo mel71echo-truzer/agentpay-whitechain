@@ -5,8 +5,8 @@
 > [Out of scope](#out-of-scope-phase-3) for what's deliberately not here.
 > The payment core (tEURC/EIP-3009 + the KYA/reputation gate + the modular
 > facilitator) has been verified end-to-end locally (`scripts/demo.py`,
-> Solidity + pytest suites) but **not yet run against real Whitechain
-> testnet** — see [Step 0](#step-0-network--wb-soul-recon) for why, and
+> Solidity + pytest suites) and is **now also deployed and run end-to-end on real Whitechain
+> testnet** — see [`TESTNET_DEPLOYMENT.md`](TESTNET_DEPLOYMENT.md) for live addresses and results, [Step 0](#step-0-network--wb-soul-recon) for context, and
 > [`DEPLOY_WHITECHAIN.md`](DEPLOY_WHITECHAIN.md) for how to do that deploy
 > yourself.
 
