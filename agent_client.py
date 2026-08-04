@@ -319,7 +319,7 @@ def pay_and_fetch(
         settlement = json.loads(base64.b64decode(encoded_settlement))
 
     if ledger is not None:
-        ledger.record(price_teurc, pay_to, settlement.get("relay_tx_hash"))
+        ledger.record(price_wei, pay_to, settlement.get("relay_tx_hash"))
 
     log.append("Ресурс отримано; авторизацію прийнято офчейн.")
 
