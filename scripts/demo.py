@@ -304,7 +304,7 @@ def main() -> None:
         f"  veteran: score={vet_ident['reputation_score']} tier={vet_ident['reputation_tier']} · "
         f"flagged: score={flag_ident['reputation_score']} tier={flag_ident['reputation_tier']}"
     )
-    vet_res = agent_client.pay_and_fetch(
+    agent_client.pay_and_fetch(
         f"{provider_url}/photo/kyiv-motherland-monument", private_key=agent_veteran.key.hex(), expected_pay_to=expected_pay_to
     )
     _ok(f"veteran (tier {vet_ident['reputation_tier']} за формулою, БЕЗ SBT) — преміум видано")
@@ -348,13 +348,16 @@ def main() -> None:
     table.add_row("Видача ресурсу", "на SettlementConfirmed" if config.WAIT_FOR_CONFIRMATION else "на broadcast")
     if latency is not None:
         table.add_row("Latency PaymentRequested→AccessGranted", f"{latency*1000:.0f} ms")
-    # Звірка утриманих коштів (F3) — операторський ендпойнт під токеном.
-    held = requests.get(
-        f"{provider_url}/admin/held-settlements",
-        headers={"Authorization": f"Bearer {config.ADMIN_API_TOKEN}"},
-        timeout=10,
-    ).json()
-    table.add_row("Утримано розрахунків (звірка F3)", str(held["held_count"]))
+    # Звірка утриманих коштів (F3) — операторський ендпойнт під токеном. На
+    # testnet-шляху ADMIN_API_TOKEN може бути незаданий (тоді /admin вимкнено,
+    # 403) — не падаємо на цьому, показуємо «н/д» замість KeyError.
+    headers = {"Authorization": f"Bearer {config.ADMIN_API_TOKEN}"} if config.ADMIN_API_TOKEN else {}
+    held_resp = requests.get(f"{provider_url}/admin/held-settlements", headers=headers, timeout=10)
+    if held_resp.status_code == 200:
+        held_value = str(held_resp.json().get("held_count", 0))
+    else:
+        held_value = "н/д (задай ADMIN_API_TOKEN для /admin/*)"
+    table.add_row("Утримано розрахунків (звірка F3)", held_value)
     console.print(table)
 
     server.should_exit = True

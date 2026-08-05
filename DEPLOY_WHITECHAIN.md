@@ -113,13 +113,15 @@ testnet. Check them on `https://testnet.whitechain.io`.
 
 - **"RPC веде на chain_id=X, а очікується Y"** — `WHITECHAIN_TESTNET_RPC`
   points at the wrong network, or `CHAIN_ID` in `.env` is wrong.
-- **Deploy or relay reverts with an "invalid opcode"-style error** —
-  `hardhat.config.ts` targets `evmVersion: "cancun"` (required by
-  OpenZeppelin 5.6's newer utilities). If Whitechain hasn't upgraded to the
-  Cancun EVM opcodes yet, lower `evmVersion` to `"shanghai"` in
-  `hardhat.config.ts`, and correspondingly pin `@openzeppelin/contracts` to
-  a version that doesn't require Solidity ≥0.8.24 (check its `package.json`
-  `engines`/peer requirements before downgrading `solidity.version` too).
+- **EVM version / opcodes** — `hardhat.config.ts` targets
+  `evmVersion: "cancun"` (used by OpenZeppelin 5.6's newer utilities). This has
+  been **confirmed working on Whitechain testnet**: the contracts were deployed
+  and run there with no opcode issue and no fallback needed (see
+  [`TESTNET_DEPLOYMENT.md`](TESTNET_DEPLOYMENT.md)). Kept here only as a
+  defensive note: if you ever target a chain whose EVM predates Cancun and hit
+  an "invalid opcode"-style revert, lower `evmVersion` to `"shanghai"` and pin
+  `@openzeppelin/contracts` to a version not requiring Solidity ≥0.8.24 (check
+  its peer/`engines` requirements before downgrading `solidity.version` too).
 - **Facilitator relay succeeds but the service provider never gets paid** —
   check the facilitator wallet's WBT (gas) balance; if it ran out mid-flow,
   the forwarding transfer (the second of the two transactions per payment)
