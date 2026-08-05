@@ -22,16 +22,39 @@
 
 ### CRITICAL
 
-**C-1. `AgentPayRouter.settlePaymentAtomic` — крадіжка через непідписаний `seller` + відсутній контроль доступу.**
-`contracts/AgentPayRouter.sol:66-105`. Функція `external` без контролю доступу; `seller`
-НЕ входить у підписане EIP-3009 повідомлення (підпис покриває `to=router`, не
-`seller`). Будь-хто, хто бачив валідну авторизацію (тіло HTTP, мемпул), викликає
-з власним `seller`, забирає `sellerAmount` і спалює nonce.
-**Статус: НЕ в живому платіжному шляху.** Роутер — roadmap-артефакт (шапка
-«ROADMAP ARTIFACT — NOT WIRED»), `chain.py` його не деплоїть, `verify_and_settle`
-його не викликає. Тому це не активна дірка продакшену, але **блокер підключення**.
-Виправлення ведеться в окремій гілці (`router-seller-binding`, підтверджено
-експлойт-тестом). **Рекомендація: НЕ підключати роутер, доки C-1 не закрито.**
+**C-1. `AgentPayRouter.settlePaymentAtomic` — крадіжка через непідписаний `seller` + відсутній контроль доступу. [ЗАКРИТО]**
+`contracts/AgentPayRouter.sol`. Стара версія: `external` без контролю доступу;
+`seller` НЕ входив у підписане EIP-3009 повідомлення (підпис покривав
+`to=router`, не `seller`). Будь-хто, хто бачив валідну авторизацію (тіло HTTP,
+мемпул), викликав з власним `seller`, забирав `sellerAmount` і спалював nonce.
+
+**Фікс (гілка `router-seller-binding`, коміт `df36f89`):**
+- **nonce виводиться on-chain** як `keccak256(abi.encode(seller, feeBps,
+  resourceHash))` і подається в `receiveWithAuthorization`. Зміна отримувача,
+  split-у чи ресурсу змінює nonce; покупець підписав оригінальний nonce, тож
+  ECDSA-recover у tEURC більше не дає `from` — токен ревертить. Релеєр не може
+  підробити підпис.
+- **сума** звʼязана як підписаний `value`; **часове вікно** підписане; **asset** —
+  immutable `teurcToken`.
+- **feeBps** — per-payment, звʼязаний у nonce, з жорстким капом `MAX_FEE_BPS`
+  (10%). Немає мутабельного глобального fee → немає другого джерела істини.
+- **контроль доступу:** allowlist релеєрів (owner-керований, facilitator-relayed
+  модель); навіть дозволений релеєр не може перенаправити кошти (призначення в
+  nonce).
+- **SafeERC20** на переказах fee/seller (перевіряє return); залишок floor-fee
+  дістається seller (як `settlement.py`). **ReentrancyGuard** на settle.
+
+**Тести (`npx hardhat test`, 23 passing):** happy-path, floor-залишок→seller,
+атака №1 (підміна seller)→revert, №2a/№2b/№2c (роздути суму/комісію)→revert,
+№3 (не-релеєр)→revert, replay→revert, KYA-гейт. Кожна атака **проходить (крадіжка)
+на старому контракті** (продемонстровано підміною контракту й old-signature
+експлойтом: attacker забирає 995000) і **ревертить на новому**.
+
+**Статус підключення:** роутер і далі **НЕ в живому платіжному шляху** —
+roadmap-артефакт (шапка «ROADMAP ARTIFACT — NOT WIRED»), `chain.py` його не
+деплоїть, `verify_and_settle` не викликає; живий шлях — `SettlementEngine`
+(custody→forward), без змін. Дірки в публічному репо більше немає; підключення —
+окрема задача (клієнтська інтеграція nonce-схеми в `agent_client.py`).
 
 ### HIGH
 
@@ -120,18 +143,17 @@ whitechain.io / немає мережевого доступу».** Після �
 
 ## Пропоную, але НЕ застосував (потрібне твоє рішення)
 
-1. **C-1 (роутер, CRITICAL)** — фікс seller-binding + контроль доступу. Ведеться в
-   гілці `router-seller-binding`. Дизайнерське рішення (механізм прив'язки seller
-   через nonce) — за тобою; НЕ підключати роутер до `verify_and_settle`, доки не
-   закрито. *Ризик застосувати наосліп: висока.*
-2. **Fee bps — дві правди.** `facilitatorFeeBps` у `AgentPayRouter.sol:32` і
-   `FACILITATOR_FEE_BPS` у `config.py:86` — при підключенні роутера Python має
-   читати bps із контракту (єдине джерело істини), а не дублювати. Зараз роутер
-   не в шляху, тож розбіжності немає, але це пастка перед підключенням. *Разом із
-   роботою над роутером.*
-3. **`transfer()` ігнорує повернене значення** — `AgentPayRouter.sol:88,90`.
-   З нашою tEURC безпечно (ревертить), але патерн — знахідка; SafeERC20 перед
-   підключенням. *Разом із роутером.*
+1. **C-1 (роутер, CRITICAL) — ЗАКРИТО** (`df36f89`, гілка `router-seller-binding`):
+   seller/сума/split/ресурс/вікно звʼязані підписом через nonce, allowlist
+   релеєрів, SafeERC20, ReentrancyGuard, 23 Solidity-тести. Див. секцію CRITICAL
+   вище. Лишається окремою задачею **підключення** (клієнтська nonce-схема).
+2. **Fee bps — ЗАКРИТО у роутері.** Стара знахідка була про дублювання
+   `facilitatorFeeBps` (контракт) vs `FACILITATOR_FEE_BPS` (config). Новий роутер
+   не має мутабельного глобального fee взагалі — `feeBps` per-payment і звʼязаний
+   у nonce, тож другого джерела істини немає. (Custody-шлях і далі читає bps із
+   config — це його власна модель, окремо.)
+3. **`transfer()` ігнорує return — ЗАКРИТО.** Новий роутер використовує SafeERC20
+   (`safeTransfer`) на переказах fee/seller.
 4. **Sybil-репутація (F7)** — `completed_payments` інкрементується локально;
    self-dealing накручує behavioral-tier. Задокументовано в
    `docs/audit/03-reputation-threat-model.md`; довіра тримається on-chain шаром
