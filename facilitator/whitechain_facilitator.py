@@ -33,9 +33,7 @@ import chain  # noqa: E402
 import config  # noqa: E402
 import money  # noqa: E402
 from facilitator import events as events_mod  # noqa: E402
-from facilitator import identity as identity_mod  # noqa: E402
 from facilitator import policy as policy_mod  # noqa: E402
-from facilitator import reputation as reputation_mod  # noqa: E402
 from facilitator.events import EventLog  # noqa: E402
 from facilitator.identity import IdentityReader  # noqa: E402
 from facilitator.payment import PaymentValidator  # noqa: E402
