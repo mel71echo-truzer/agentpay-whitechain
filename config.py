@@ -118,6 +118,9 @@ FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 SETTLEMENT_MODE = os.getenv("SETTLEMENT_MODE", "legacy").strip().lower()
 # Адреса розгорнутого AgentPayRouter (потрібна лише в atomic-режимі).
 ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "")
+# KYA-реєстр роутера (MockRouterKYA — заглушка WB Soul). Потрібен, щоб засіяти
+# verified-soul покупцям на testnet; локальне demo деплоїть і сіє його саме.
+ROUTER_KYA_ADDRESS = os.getenv("ROUTER_KYA_ADDRESS", "")
 # Скарбниця: owner роутера й отримувач комісії у atomic-режимі. За замовчуванням
 # — гаманець facilitator-а (щоб demo працював без окремого казначейського
 # гаманця; у legacy комісія так само осідає у facilitator-а).

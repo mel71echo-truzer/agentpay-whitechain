@@ -74,6 +74,48 @@ async function main() {
     envLines.push("USE_MOCK_SOUL=false");
   }
 
+  // --- Фаза 2.5: атомарний AgentPayRouter (SETTLEMENT_MODE=atomic) ---
+  // KYA-реєстр роутера — MockRouterKYA (заглушка WB Soul, що реалізує
+  // isVerified(uint256); атрибутний MockSoulRegistry цього інтерфейсу не має).
+  // Адаптер під реальний WB Soul — roadmap. На testnet после деплою треба
+  // засіяти verified soul покупцям: kya.setSoul(buyer, id); kya.setVerified(id, true).
+  const RouterKYA = await ethers.getContractFactory("MockRouterKYA");
+  const routerKya = await RouterKYA.deploy();
+  await routerKya.waitForDeployment();
+  const routerKyaAddress = await routerKya.getAddress();
+  console.log(`MockRouterKYA (WB Soul stub for router) deployed: ${routerKyaAddress}`);
+
+  const Router = await ethers.getContractFactory("AgentPayRouter");
+  const router = await Router.deploy(teurcAddress, routerKyaAddress);
+  await router.waitForDeployment();
+  const routerAddress = await router.getAddress();
+  console.log(`AgentPayRouter deployed: ${routerAddress}`);
+
+  // Facilitator має бути в allow-list релеєрів (тільки він сабмітить settle).
+  const facilitator = process.env.FACILITATOR_WALLET_ADDRESS;
+  if (facilitator) {
+    await (await router.setRelayer(facilitator, true)).wait();
+    console.log(`  setRelayer(${facilitator}, true) — facilitator allow-listed`);
+  } else {
+    console.log("  FACILITATOR_WALLET_ADDRESS not set — run setRelayer(facilitator, true) manually.");
+  }
+
+  // owner() = скарбниця (отримувач комісії). Дефолт — facilitator, якщо TREASURY не заданий.
+  const treasury = process.env.TREASURY_ADDRESS || facilitator;
+  if (treasury && treasury.toLowerCase() !== deployer.address.toLowerCase()) {
+    await (await router.transferOwnership(treasury)).wait();
+    console.log(`  transferOwnership(${treasury}) — treasury owns router / receives fees`);
+  } else {
+    console.log("  Router owner stays the deployer (no distinct TREASURY_ADDRESS set).");
+  }
+
+  envLines.push(
+    "SETTLEMENT_MODE=atomic",
+    `ROUTER_ADDRESS=${routerAddress}`,
+    `TREASURY_ADDRESS=${treasury ?? ""}`,
+    `ROUTER_KYA_ADDRESS=${routerKyaAddress}`
+  );
+
   console.log("\nCopy these into your .env:\n");
   console.log(envLines.join("\n"));
 }

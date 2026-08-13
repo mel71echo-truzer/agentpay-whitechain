@@ -7,14 +7,19 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ROADMAP ARTIFACT — NOT WIRED INTO THE PAYMENT FLOW.
+// ATOMIC SETTLEMENT ROUTER — wired into the live path behind SETTLEMENT_MODE=atomic.
 //
-// The live settlement path is facilitator/settlement.py::SettlementEngine
-// (off-chain EIP-3009 relay, then custody→forward). This contract is the
-// Phase 2.5 direction: receive + fee-split + payout in ONE atomic transaction,
-// which removes the partial-failure window the off-chain path handles with a
-// journal + a "funds held" state (finding F3). No Python deploys or calls it;
-// chain.py has no artifact entry for it.
+// receive + fee-split + payout in ONE transaction, removing the partial-failure
+// window the off-chain path (facilitator/settlement.py::SettlementEngine, still
+// the default legacy backend) handles with a journal + a "funds held" state
+// (finding F3). The Python side deploys and calls it via chain.py
+// ("AgentPayRouter" artifact) and facilitator/atomic_settlement.py; the client
+// mirrors the signed binding in router_binding.py / agent_client.py.
+//
+// KYA on testnet/local is driven by MockRouterKYA (a WB Soul stub implementing
+// isVerified(uint256)); a real WB Soul adapter over the attribute-based
+// ISoulAttributeRegistry is roadmap. The on-chain KYA gate below is NOT
+// weakened — it runs against whatever registry this router is deployed with.
 //
 // SECURITY — finding C-1 (seller-binding theft) is CLOSED here:
 // The earlier version was `external` with no access control and took `seller`
