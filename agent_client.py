@@ -33,6 +33,7 @@ from web3 import Web3
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import registry_auth  # noqa: E402
+import router_binding  # noqa: E402
 
 TRANSFER_AUTH_TYPES = {
     "TransferWithAuthorization": [
@@ -195,19 +196,44 @@ def build_and_sign_authorization(
     teurc_address: str,
     chain_id: int,
     teurc_name: str = "Test EURC",
+    *,
+    settlement_mode: str = "legacy",
+    seller: str | None = None,
+    fee_bps: int = 0,
 ) -> dict:
-    """Будує й підписує EIP-3009 TransferWithAuthorization для `resource`.
+    """Будує й підписує EIP-3009 authorization для `resource`.
+
+    - legacy: TransferWithAuthorization, `to` = facilitator, nonce =
+      keccak256(resource‖salt). Facilitator релеїть і потім форвардить нетто.
+    - atomic: ReceiveWithAuthorization, `to` = router, nonce =
+      computeNonce(seller, feeBps, resourceHash) — дзеркало C-1 у контракті
+      (contracts/AgentPayRouter.sol). Роутер сам перерахує nonce з (seller,
+      feeBps, resourceHash); підпис покриває саме цей похідний nonce, тож
+      релеєр не може підмінити продавця/комісію/суму, не зламавши підпис.
 
     Повертає dict, готовий для відправки сервісу:
     {"authorization": {...}, "resource": ..., "resource_salt": "0x..."}
     """
     account = Account.from_key(private_key)
     salt = os.urandom(32)
-    nonce = Web3.keccak(resource.encode("utf-8") + salt)
 
     now = int(time.time())
     # value_wei — уже int wei (конверсія на межі виклику). Валідуємо тип.
     value_wei = int(value_wei)
+
+    mode = settlement_mode.strip().lower()
+    if mode == "atomic":
+        if seller is None:
+            raise ValueError("atomic-режим потребує seller для похідного nonce.")
+        # Похідний nonce вшиває отримувача+комісію+ресурс (єдиний спільний код
+        # із валідатором фасилітатора — router_binding — щоб не розійтись).
+        rhash = router_binding.resource_hash(resource, salt)
+        nonce = router_binding.compute_router_nonce(seller, fee_bps, rhash)
+        auth_types = router_binding.RECEIVE_AUTH_TYPES
+    else:
+        # legacy: nonce прив'язаний лише до ресурсу; сервер звіряє його з (resource, salt).
+        nonce = Web3.keccak(resource.encode("utf-8") + salt)
+        auth_types = TRANSFER_AUTH_TYPES
 
     message = {
         "from": account.address,
@@ -223,7 +249,7 @@ def build_and_sign_authorization(
         "chainId": chain_id,
         "verifyingContract": Web3.to_checksum_address(teurc_address),
     }
-    signable = encode_typed_data(domain, TRANSFER_AUTH_TYPES, message)
+    signable = encode_typed_data(domain, auth_types, message)
     signed = Account.sign_message(signable, private_key)
 
     return {
@@ -296,6 +322,9 @@ def pay_and_fetch(
     if ledger is not None:
         ledger.ensure_can_spend(price_wei)
 
+    # У atomic-режимі 402 несе payTo=router + seller + fee_bps; клієнт дзеркалить
+    # похідний nonce (C-1). Legacy 402 не має цих полів → підпис Transfer як раніше.
+    settlement_mode = accept.get("settlement_mode", "legacy")
     payload = build_and_sign_authorization(
         private_key,
         pay_to,
@@ -303,6 +332,9 @@ def pay_and_fetch(
         resource,
         teurc_address,
         chain_id if chain_id is not None else config.CHAIN_ID,
+        settlement_mode=settlement_mode,
+        seller=accept.get("seller"),
+        fee_bps=int(accept.get("fee_bps", 0)),
     )
 
     paid_response = requests.post(url, json=payload, timeout=30)
