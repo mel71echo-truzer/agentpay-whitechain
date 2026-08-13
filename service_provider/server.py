@@ -81,11 +81,16 @@ def init_facilitator(fac: WhitechainFacilitator) -> None:
     # Провайдер сам підписує свій запис реєстру (F4 #A): id == його адреса,
     # pay_to == адреса facilitator-а (куди реально йдуть кошти). Без ключа
     # провайдера цей запис не зареєструвати й не підмінити.
+    # pay_to залежить від режиму розрахунку: у atomic кошти йдуть на роутер
+    # (EIP-3009 payee), у legacy — на facilitator. Клієнт закріплює цей
+    # ПІДПИСАНИЙ pay_to й потім звіряє з payTo у 402 (F4 #A) — тож режим має
+    # відбитись і тут, інакше atomic-402 (payTo=router) хибно не зійдеться.
+    pay_to = config.ROUTER_ADDRESS if config.SETTLEMENT_MODE == "atomic" else config.FACILITATOR_WALLET_ADDRESS
     record = {
         "id": config.SERVICE_PROVIDER_WALLET_ADDRESS,
         "capability_type": config.CAPABILITY_TYPE,
         "provider_url": config.SERVICE_PROVIDER_BASE_URL,
-        "pay_to": config.FACILITATOR_WALLET_ADDRESS,
+        "pay_to": pay_to,
         "price_wei": config.RESOURCE_PRICE_WEI,
         "min_reputation_tier": 0,
         "active": True,
@@ -105,24 +110,33 @@ def _payment_requirements(resource_path: str, price_wei: int, min_reputation_tie
     """Формує x402 payment requirements — тіло 402-відповіді.
 
     B3: авторитетна ціна — int `price_wei`; `price_teurc` (рядок) лишається
-    для показу людині. Клієнт підписує суму саме за `price_wei`."""
-    return {
-        "x402Version": 1,
-        "accepts": [
-            {
-                "scheme": "exact-eip3009",
-                "network": f"whitechain-{config.NETWORK}-{config.CHAIN_ID}",
-                "payTo": config.FACILITATOR_WALLET_ADDRESS,
-                "asset": "tEURC",
-                "asset_address": config.TEURC_ADDRESS,
-                "price_wei": price_wei,
-                "price_teurc": money.wei_to_teurc_str(price_wei, config.TEURC_DECIMALS),
-                "resource": resource_path,
-                "min_reputation_tier": min_reputation_tier,
-                "description": f"Resource: {resource_path}",
-            }
-        ],
+    для показу людині. Клієнт підписує суму саме за `price_wei`.
+
+    Режим розрахунку відбивається у тілі 402:
+      legacy — payTo = facilitator; клієнт підписує TransferWithAuthorization.
+      atomic — payTo = router; додаємо seller + fee_bps, щоб клієнт вивів той
+      самий похідний nonce (C-1) і підписав ReceiveWithAuthorization на роутер."""
+    atomic = config.SETTLEMENT_MODE == "atomic"
+    accept = {
+        "scheme": "exact-eip3009",
+        "network": f"whitechain-{config.NETWORK}-{config.CHAIN_ID}",
+        "payTo": config.ROUTER_ADDRESS if atomic else config.FACILITATOR_WALLET_ADDRESS,
+        "asset": "tEURC",
+        "asset_address": config.TEURC_ADDRESS,
+        "price_wei": price_wei,
+        "price_teurc": money.wei_to_teurc_str(price_wei, config.TEURC_DECIMALS),
+        "resource": resource_path,
+        "min_reputation_tier": min_reputation_tier,
+        "description": f"Resource: {resource_path}",
+        "settlement_mode": config.SETTLEMENT_MODE,
     }
+    if atomic:
+        # seller/fee_bps — авторитетні параметри розрахунку; клієнт вшиває їх у
+        # похідний nonce. Facilitator при валідації перераховує nonce з ВЛАСНИХ
+        # seller/fee_bps, тож клієнт, що змінив би їх, дістав би reject.
+        accept["seller"] = config.SERVICE_PROVIDER_WALLET_ADDRESS
+        accept["fee_bps"] = config.FACILITATOR_FEE_BPS
+    return {"x402Version": 1, "accepts": [accept]}
 
 
 def _resolve_image(name: str) -> Path | None:

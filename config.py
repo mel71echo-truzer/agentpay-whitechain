@@ -106,6 +106,23 @@ PREMIUM_MIN_REPUTATION_TIER = _int_env("PREMIUM_MIN_REPUTATION_TIER", 1)
 # Комісія facilitator-а з кожного платежу, у базисних пунктах (50 = 0.5%).
 FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 
+# --- Фаза 2.5: атомарний settlement через AgentPayRouter ---
+# legacy -> офчейн relay+forward (SettlementEngine: дві tx, є вікно часткового
+#           збою «списано-але-не-переслано», яке звіряється журналом F3).
+# atomic -> AgentPayRouter.settlePaymentAtomic: одна tx (receive+split), тож
+#           стану funds-held не існує в принципі. Прив'язку продавця/суми/
+#           комісії/ресурсу до підпису закрито у C-1 (contracts/AgentPayRouter.sol).
+# Дефолт лишається legacy ПІД ЧАС РОЗРОБКИ, щоб робочий demo не ламався
+# посеред рефактора; переключиться на atomic окремим (останнім) кроком, коли
+# інтеграційний тест atomic-шляху зелений.
+SETTLEMENT_MODE = os.getenv("SETTLEMENT_MODE", "legacy").strip().lower()
+# Адреса розгорнутого AgentPayRouter (потрібна лише в atomic-режимі).
+ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "")
+# Скарбниця: owner роутера й отримувач комісії у atomic-режимі. За замовчуванням
+# — гаманець facilitator-а (щоб demo працював без окремого казначейського
+# гаманця; у legacy комісія так само осідає у facilitator-а).
+TREASURY_ADDRESS = os.getenv("TREASURY_ADDRESS", "") or FACILITATOR_WALLET_ADDRESS
+
 # --- Ліміт витрат агента-автора на завдання ---
 AUTHOR_MAX_SPEND_WEI = _price_wei_env("AUTHOR_MAX_SPEND_TEURC", "1.0")
 SPEND_LEDGER_PATH = os.getenv("SPEND_LEDGER_PATH", ".spend_ledger.json")
