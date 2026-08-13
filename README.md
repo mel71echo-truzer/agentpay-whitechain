@@ -352,15 +352,25 @@ they're always fresh and unaffected.)
 
 ## Trade-offs worth knowing about
 
-- **Fee via custody, not an atomic split.** The facilitator receives the
-  full payment at its own address, then forwards price-minus-fee to the
-  service provider in a second transaction. Simpler than an atomic router
-  contract, but it means the facilitator briefly custodies buyer funds. If the
-  relay confirms but the forward reverts, the settlement is journaled as an
-  explicit **funds-held / obligation-unmet** state (no silent loss) rather than
-  retried automatically. Operators can list these for reconciliation via
-  `GET /admin/held-settlements` (each entry carries the relay tx hash);
-  forwarding them is a deliberate manual step, not an automatic retry.
+- **Two settlement backends, selected by `SETTLEMENT_MODE`.**
+  - `legacy` (**default** during development): the facilitator receives the
+    full payment at its own address, then forwards price-minus-fee to the
+    service provider in a **second** transaction — it briefly custodies buyer
+    funds. If the relay confirms but the forward reverts, the settlement is
+    journaled as an explicit **funds-held / obligation-unmet** state (no silent
+    loss) rather than retried automatically. Operators list these for
+    reconciliation via `GET /admin/held-settlements` (each entry carries the
+    relay tx hash); forwarding is a deliberate manual step, not an auto-retry.
+  - `atomic`: settlement goes through `AgentPayRouter.settlePaymentAtomic` —
+    receive + fee-split + payout in **one** transaction, so the funds-held
+    window cannot exist (it either all lands or reverts with nothing moved).
+    Every fund-moving parameter (payee, amount, fee, resource) is bound into
+    the buyer's EIP-3009 signature via a derived nonce; the relayer cannot
+    redirect funds (finding **C-1**, closed — see `AUDIT_REPORT.md`). The same
+    seam (`settle(message, authorization)`) drives both — callers are unchanged.
+    On testnet/local the router's KYA gate runs against `MockRouterKYA`, a WB
+    Soul stub; a real WB Soul adapter is the one remaining integration piece
+    (see below).
 - **Confirmation vs. latency.** By default (`WAIT_FOR_CONFIRMATION=true`)
   the resource is released only after the relay's receipt is mined
   (SettlementConfirmed), which closes the off-chain race where content
@@ -414,11 +424,17 @@ consciously left as roadmap, not overlooked:
 - **On-chain capability registry** — discovery is a local SQLite table today;
   a decentralized, on-chain registry (so discovery doesn't trust one node)
   is future work.
-- **Escrow / atomic router contract (Phase 2.5)** — settlement is
-  receive-full-then-forward with the facilitator briefly custodying funds;
-  `settlement.py` keeps a clean seam so an atomic router/escrow contract can
-  replace it without touching callers. That contract itself is a separate
-  phase.
+- **Atomic router (Phase 2.5) — now built; live WB Soul integration is the
+  remaining piece.** `AgentPayRouter.settlePaymentAtomic` (receive + fee-split
+  + payout in one tx, C-1 closed) is wired into the live path behind
+  `SETTLEMENT_MODE=atomic` and passes end-to-end on the local chain. What is
+  *not* yet real is its on-chain KYA source: the router reads
+  `ISoulRegistry.isVerified(uint256)`, which the attribute-based WB Soul does
+  not expose, so testnet/local uses `MockRouterKYA` (a stub). A small adapter
+  from the router's interface onto the real WB Soul attribute registry —
+  written against WhiteBIT's confirmed attribute schema — is the concrete
+  next deliverable, deliberately deferred until that schema is confirmed rather
+  than guessed against the mock.
 - **Payment channels / batching / streaming** — every purchase is its own
   on-chain settlement; no channels/batching to amortize gas, and payment is
   all-or-nothing per resource rather than metered/continuous.
