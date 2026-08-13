@@ -80,6 +80,11 @@ def facilitator_setup(tmp_path):
     config.SERVICE_PROVIDER_WALLET_PRIVATE_KEY = service_provider_acct.key.hex()
     config.CHAIN_ID = w3.eth.chain_id
     config.FACILITATOR_FEE_BPS = 50
+    # Ця фікстура готує саме LEGACY-оточення (relay+forward, без роутера). Пінимо
+    # режим явно — щоб продуктовий дефолт (atomic) не змушував цей facilitator
+    # шукати неіснуючий ROUTER_ADDRESS. Атомарний шлях покриває окремий
+    # інтеграційний тест (test_atomic_settlement_integration).
+    config.SETTLEMENT_MODE = "legacy"
     config.SPEND_LEDGER_PATH = str(tmp_path / "spend_ledger.json")
     config.AUTHOR_MAX_SPEND_WEI = money.teurc_to_wei("1.0", config.TEURC_DECIMALS)
 

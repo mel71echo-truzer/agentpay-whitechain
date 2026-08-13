@@ -112,10 +112,12 @@ FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 # atomic -> AgentPayRouter.settlePaymentAtomic: одна tx (receive+split), тож
 #           стану funds-held не існує в принципі. Прив'язку продавця/суми/
 #           комісії/ресурсу до підпису закрито у C-1 (contracts/AgentPayRouter.sol).
-# Дефолт лишається legacy ПІД ЧАС РОЗРОБКИ, щоб робочий demo не ламався
-# посеред рефактора; переключиться на atomic окремим (останнім) кроком, коли
-# інтеграційний тест atomic-шляху зелений.
-SETTLEMENT_MODE = os.getenv("SETTLEMENT_MODE", "legacy").strip().lower()
+# Дефолт — ATOMIC: розрахунок однією tx (receive+split) без вікна funds-held,
+# із прив'язкою продавця/суми/комісії/ресурсу до підпису (C-1 закрито). Legacy
+# (relay+forward) лишається доступним через SETTLEMENT_MODE=legacy для швидкого
+# офчейн-демо чи мереж без розгорнутого роутера. Перемкнено на atomic після
+# того, як інтеграційний тест atomic-шляху став зеленим (KROK 3).
+SETTLEMENT_MODE = os.getenv("SETTLEMENT_MODE", "atomic").strip().lower()
 # Адреса розгорнутого AgentPayRouter (потрібна лише в atomic-режимі).
 ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "")
 # KYA-реєстр роутера (MockRouterKYA — заглушка WB Soul). Потрібен, щоб засіяти
