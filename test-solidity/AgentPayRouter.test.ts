@@ -222,4 +222,55 @@ describe("AgentPayRouter — atomic settlement + C-1 seller-binding", function (
         .settlePaymentAtomic(honestSeller.address, attacker.address, AMOUNT, FEE_BPS, 0n, validBefore, RESOURCE_HASH, v, r, s),
     ).to.be.revertedWithCustomError(router, "KYACheckFailed");
   });
+
+  it("KYA: a buyer whose soul exists but is NOT verified -> KYACheckFailed", async function () {
+    // Distinct branch from the soulId==0 case above: soulId != 0 but isVerified=false.
+    await kya.setSoul(attacker.address, 2); // verified stays false (default)
+    const validBefore = await future();
+    const { v, r, s } = await signAuth(
+      attacker, teurcAddr, routerAddr, chainId, AMOUNT, honestSeller.address, FEE_BPS, RESOURCE_HASH, 0n, validBefore,
+    );
+    await expect(
+      router
+        .connect(relayer)
+        .settlePaymentAtomic(attacker.address, honestSeller.address, AMOUNT, FEE_BPS, 0n, validBefore, RESOURCE_HASH, v, r, s),
+    ).to.be.revertedWithCustomError(router, "KYACheckFailed");
+  });
+
+  // ---- fee-split edge: zero fee ----
+
+  it("feeBps=0: no fee transfer; seller receives the full amount", async function () {
+    const validBefore = await future();
+    const ownerBefore = await tEURC.balanceOf(owner.address);
+    const { v, r, s } = await signAuth(
+      buyer, teurcAddr, routerAddr, chainId, AMOUNT, honestSeller.address, 0, RESOURCE_HASH, 0n, validBefore,
+    );
+    await router
+      .connect(relayer)
+      .settlePaymentAtomic(buyer.address, honestSeller.address, AMOUNT, 0, 0n, validBefore, RESOURCE_HASH, v, r, s);
+
+    expect(await tEURC.balanceOf(honestSeller.address)).to.equal(AMOUNT); // full amount, no fee
+    expect(await tEURC.balanceOf(owner.address)).to.equal(ownerBefore); // owner got nothing
+  });
+
+  // ---- constructor input validation ----
+
+  it("constructor: reverts ZeroAddress if the token or the soul registry is address(0)", async function () {
+    const Factory = await ethers.getContractFactory("AgentPayRouter");
+    await expect(Factory.deploy(ethers.ZeroAddress, await kya.getAddress())).to.be.revertedWithCustomError(
+      router,
+      "ZeroAddress",
+    );
+    await expect(Factory.deploy(teurcAddr, ethers.ZeroAddress)).to.be.revertedWithCustomError(router, "ZeroAddress");
+  });
+
+  // ---- Ownable2Step handoff ----
+
+  it("Ownable2Step: ownership transfers only after the new owner accepts", async function () {
+    await router.connect(owner).transferOwnership(attacker.address);
+    expect(await router.owner()).to.equal(owner.address); // not yet
+    expect(await router.pendingOwner()).to.equal(attacker.address);
+    await router.connect(attacker).acceptOwnership();
+    expect(await router.owner()).to.equal(attacker.address);
+  });
 });

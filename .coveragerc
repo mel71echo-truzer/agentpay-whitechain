@@ -1,0 +1,35 @@
+# Coverage config (Phase 3). Scopes measurement to the payment-critical,
+# test-exercised source. Deliberately omitted, with reasons:
+#   - tests/            : the tests themselves
+#   - scripts/demo.py   : an end-to-end demo harness, run separately (not a unit)
+#   - author/agent.py   : the Claude tool-use buyer; needs a live ANTHROPIC_API_KEY,
+#                         so it is exercised in the live demo, not the offline suite
+#   - wallets/          : interactive key-printing utilities (not import-safe to run)
+# Everything that moves money or gates a payment IS measured.
+[run]
+branch = True
+source =
+    facilitator
+    service_provider
+    config
+    money
+    chain
+    agent_client
+    registry_auth
+    router_binding
+omit =
+    tests/*
+    scripts/*
+    author/*
+    wallets/*
+    */__pycache__/*
+
+[report]
+show_missing = True
+skip_covered = False
+# Lines that are defensive/unreachable-by-design or environment-specific.
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    if TYPE_CHECKING:

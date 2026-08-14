@@ -13,6 +13,8 @@ eth-tester
 py-evm>=0.12.0b2,<0.13.0b1
 eth-hash[pycryptodome]>=0.1.4,<1.0.0
 pytest>=8.0.0
+# Coverage (Phase 3): `python -m pytest --cov` (config in .coveragerc). See COVERAGE.md.
+pytest-cov>=5.0.0
 # Solidity static analysis (Phase 2). Run per docs/audit/06-slither.md; needs a
 # solc 0.8.24 binary (scripts/bootstrap_solc.sh provides a sha256-verified one).
 slither-analyzer>=0.11.0

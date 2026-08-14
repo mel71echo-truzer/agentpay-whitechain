@@ -21,3 +21,6 @@ registry.json
 .coverage
 htmlcov/
 coverage.xml
+# solidity-coverage (Istanbul) output
+coverage/
+coverage.json
