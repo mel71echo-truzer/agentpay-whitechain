@@ -241,19 +241,19 @@ def main() -> None:
         console.print(f"  {agent_no_soul.address[:10]}... — Soul НЕ реєструється (навмисно).")
 
         if config.SETTLEMENT_MODE == "atomic":
-            # Ончейн KYA-гейт роутера читає ОКРЕМИЙ реєстр (MockRouterKYA, заглушка
-            # WB Soul з isVerified(uint256)). Сіємо verified-soul тим самим
+            # Ончейн KYA-гейт роутера читає ОКРЕМИЙ реєстр через ПІДКЛЮЧУВАНИЙ
+            # адаптер (facilitator/router_kya_adapter.py): mock сьогодні, реальний
+            # WB Soul — коли схему підтверджено. Сіємо verified-soul тим самим
             # верифікованим агентам, щоб атомарний settle проходив. agent_no_soul
             # НЕ сіємо — його й так відсіює Python-policy до settlement.
-            router_kya = chain.get_contract(w3, "MockRouterKYA", config.ROUTER_KYA_ADDRESS)
-            for i, agent in enumerate(
-                (agent_with_soul, agent_with_soul_and_sbt, agent_veteran, agent_flagged), start=1
-            ):
-                tx = chain.send_contract_tx(w3, deployer_key, router_kya.functions.setSoul(agent.address, i))
-                w3.eth.wait_for_transaction_receipt(tx)
-                tx = chain.send_contract_tx(w3, deployer_key, router_kya.functions.setVerified(i, True))
-                w3.eth.wait_for_transaction_receipt(tx)
-            console.print("  MockRouterKYA засіяно verified-souls для роутерового KYA-гейту (atomic).")
+            from facilitator.router_kya_adapter import get_router_kya_adapter
+
+            kya = get_router_kya_adapter(w3, config.ROUTER_KYA_ADDRESS, use_mock=config.USE_MOCK_SOUL)
+            kya.seed_verified(
+                deployer_key,
+                [agent_with_soul.address, agent_with_soul_and_sbt.address, agent_veteran.address, agent_flagged.address],
+            )
+            console.print("  Router KYA (adapter) засіяно verified-souls для роутерового KYA-гейту (atomic).")
     else:
         console.print(
             "\n[yellow]USE_MOCK_SOUL=false — цей демо-скрипт очікує, що агенти вже "

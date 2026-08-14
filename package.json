@@ -4,8 +4,9 @@
   "description": "Solidity contracts for AgentPay on Whitechain: tEURC (EIP-3009 test stablecoin) and WB Soul KYA/SBT mocks",
   "private": true,
   "scripts": {
-    "compile": "hardhat compile",
-    "test": "hardhat test",
+    "bootstrap:solc": "bash scripts/bootstrap_solc.sh",
+    "compile": "bash scripts/bootstrap_solc.sh && hardhat compile",
+    "test": "bash scripts/bootstrap_solc.sh && hardhat test",
     "node": "hardhat node",
     "deploy:local": "hardhat run deploy/deploy.ts --network localhost",
     "deploy:testnet": "hardhat run deploy/deploy.ts --network whitechain_testnet"

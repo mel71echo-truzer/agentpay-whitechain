@@ -9,6 +9,12 @@ it in order; each step tells you what to put in `.env`.
 - Node.js 18+, Python 3.11+, `npm install` and `pip install -r requirements.txt`
   already run in this repo.
 - A wallet you control, with its private key available (never commit it).
+- **Compiler:** `npm run compile` (not bare `npx hardhat compile`) — it runs
+  `scripts/bootstrap_solc.sh` first, which fetches solc `0.8.24` from the GitHub
+  mirror and verifies its sha256 before use. This makes a clean clone compile
+  even on networks that block `binaries.soliditylang.org` (the host Hardhat
+  normally downloads solc from). It's idempotent and a no-op once cached. On an
+  unrestricted network bare `npx hardhat compile` works too.
 
 ## 1. Get testnet WBT from the faucet
 
@@ -31,8 +37,8 @@ tEURC (the actual payment currency, which you mint yourself in step 3).
 
 ```bash
 NETWORK=whitechain_testnet
-WHITECHAIN_TESTNET_RPC=<RPC URL from docs.whitechain.io>
-CHAIN_ID=2625
+WHITECHAIN_TESTNET_RPC=https://rpc-testnet.whitechain.io
+CHAIN_ID=2625   # 0xa41; the facilitator refuses to run if the RPC reports a different chain
 DEPLOYER_PRIVATE_KEY=<the wallet you funded in step 1 — this account deploys and owns the contracts>
 
 AUTHOR_WALLET_ADDRESS=<from wallets/setup_wallets.py>
@@ -100,22 +106,26 @@ and unused).
 
 **KYA in atomic mode is a stub on testnet.** `AgentPayRouter` gates payers via
 `ISoulRegistry.isVerified(uint256)`, which the real attribute-based WB Soul does
-**not** expose — so the router is deployed against `MockRouterKYA`. Before an
-agent can pay in atomic mode, seed a verified soul for it in that stub (owner is
-open — anyone can call):
+**not** expose — so the router is deployed against `MockRouterKYA`. The choice of
+KYA source is a **pluggable module**, `facilitator/router_kya_adapter.py`, so
+switching mock ↔ real WB Soul is a config change (`USE_MOCK_SOUL`), not a
+rewrite. Before an agent can pay in atomic mode, seed a verified soul for it via
+that adapter:
 
 ```python
 import chain, config
+from facilitator.router_kya_adapter import get_router_kya_adapter
+
 w3 = chain.get_w3()
-kya = chain.get_contract(w3, "MockRouterKYA", config.ROUTER_KYA_ADDRESS)
-key = config.DEPLOYER_PRIVATE_KEY
-for i, buyer in enumerate([config.AUTHOR_WALLET_ADDRESS], start=1):
-    w3.eth.wait_for_transaction_receipt(chain.send_contract_tx(w3, key, kya.functions.setSoul(buyer, i)))
-    w3.eth.wait_for_transaction_receipt(chain.send_contract_tx(w3, key, kya.functions.setVerified(i, True)))
+kya = get_router_kya_adapter(w3, config.ROUTER_KYA_ADDRESS, use_mock=config.USE_MOCK_SOUL)
+kya.seed_verified(config.DEPLOYER_PRIVATE_KEY, [config.AUTHOR_WALLET_ADDRESS])
 ```
 
-A real WB Soul adapter (over `ISoulAttributeRegistry`) replaces this stub once
-the attribute schema is confirmed — see the README "Out of scope" note.
+The **real** WB Soul integration is deliberately **not guessed**:
+`WBSoulRouterKYAAdapter` raises `NotImplementedError` with a precise TODO
+(`router_kya_adapter.py`) until WhiteBIT's attribute-verification schema is
+confirmed — most likely an on-chain shim exposing `isVerified(uint256)` over
+`ISoulAttributeRegistry`. Until then, keep `USE_MOCK_SOUL=true`.
 
 ## 5. Mint yourself some tEURC
 

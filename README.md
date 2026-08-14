@@ -249,7 +249,10 @@ cp .env.example .env
 
 # Solidity side (compiles the contracts scripts/demo.py and the tests deploy)
 npm install
-npx hardhat compile
+npm run compile        # bootstraps a sha256-verified solc, then compiles
+# ^ `npm run compile` runs scripts/bootstrap_solc.sh first, so a clean clone
+#   compiles even on networks that block binaries.soliditylang.org. On an
+#   unrestricted network, bare `npx hardhat compile` also works.
 
 # Run it
 python scripts/demo.py

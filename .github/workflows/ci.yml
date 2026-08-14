@@ -46,6 +46,11 @@ jobs:
       - name: Install Node deps (from lockfile)
         run: npm ci
 
+      # GitHub-hosted runners can reach binaries.soliditylang.org, so bare
+      # `hardhat compile` downloads solc fine here (both OSes). On networks that
+      # block that host, use `npm run compile` instead — it bootstraps a
+      # sha256-verified solc from the GitHub mirror first (Linux/macOS); see
+      # scripts/bootstrap_solc.sh and README.
       - name: Compile contracts (needed before pytest)
         run: npx hardhat compile
 
