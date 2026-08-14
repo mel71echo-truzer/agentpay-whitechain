@@ -200,9 +200,11 @@ class WhitechainFacilitator:
             )
         except SettlementError as exc:
             # Чистий збій: релей не пройшов, кошти не рухалися.
+            # Повний текст винятку (може нести внутрішні RPC/revert-деталі) — ЛИШЕ
+            # в лог; клієнту — узагальнена причина без str(exc) (F-01).
             logger.warning("Settlement провалився (кошти не рухалися): %s", exc)
             emit(events_mod.SETTLEMENT_FAILED)
-            return self._deny(f"Розрахунок не вдався: {exc}", agent_identity, emitted)
+            return self._deny("Внутрішня помилка розрахунку, спробуйте пізніше.", agent_identity, emitted)
         emit(events_mod.SETTLEMENT_SUBMITTED, tx_hash=result["relay_tx_hash"])
         if result["confirmed"]:
             emit(events_mod.SETTLEMENT_CONFIRMED, tx_hash=result["relay_tx_hash"])

@@ -315,9 +315,13 @@ def main() -> None:
     console.print("\n[bold]Крок 8 — той самий агент купує звичайне фото[/bold]")
     result = agent_client.pay_and_fetch(f"{provider_url}/photo/kyiv-lavra", private_key=agent_with_soul.key.hex(), expected_pay_to=expected_pay_to)
     _ok("агент із Soul — офчейн-підпис прийнято; ресурс видано на SettlementConfirmed")
+    # Куди реально йде комісія: у atomic — on-chain на owner() роутера (treasury,
+    # AgentPayRouter._split → safeTransfer(owner(), feeAmount)); у legacy — осідає
+    # у facilitator-а (relay отримує повну суму, форвардить нетто).
+    fee_dest = "treasury (owner роутера)" if config.SETTLEMENT_MODE == "atomic" else "facilitator"
     _ok(
         f"контент видано ({len(result.content)} байт), комісія {result.fee_teurc} tEURC "
-        f"списана на facilitator, reputation_tier={result.reputation_tier}"
+        f"пішла на {fee_dest}, reputation_tier={result.reputation_tier}"
     )
 
     console.print("\n[bold]Крок 9 — агент із Soul І SBT купує те саме преміум-фото[/bold]")
