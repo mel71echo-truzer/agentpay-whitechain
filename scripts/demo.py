@@ -112,6 +112,20 @@ def setup_local_chain() -> str:
     config.CHAIN_ID = w3.eth.chain_id
     config.SERVICE_PROVIDER_BASE_URL = f"http://{config.SERVICE_PROVIDER_HOST}:{config.SERVICE_PROVIDER_PORT}"
 
+    if config.SETTLEMENT_MODE == "atomic":
+        # Атомарний шлях: роутер + KYA-заглушка. Owner=deployer (отримує комісію);
+        # facilitator у allow-list релеєрів. Verified-souls покупцям сіємо в main()
+        # (адреси агентів створюються там).
+        console.print("SETTLEMENT_MODE=atomic — деплою MockRouterKYA + AgentPayRouter локально...")
+        router_kya_addr = chain.deploy_contract(w3, deployer.key.hex(), "MockRouterKYA")
+        router_addr = chain.deploy_contract(w3, deployer.key.hex(), "AgentPayRouter", teurc_addr, router_kya_addr)
+        router = chain.get_contract(w3, "AgentPayRouter", router_addr)
+        tx = chain.send_contract_tx(w3, deployer.key.hex(), router.functions.setRelayer(facilitator_acct.address, True))
+        w3.eth.wait_for_transaction_receipt(tx)
+        config.ROUTER_ADDRESS = router_addr
+        config.ROUTER_KYA_ADDRESS = router_kya_addr
+        config.TREASURY_ADDRESS = deployer.address  # owner()=deployer у локальному demo
+
     return deployer.key.hex()
 
 
@@ -225,6 +239,21 @@ def main() -> None:
         w3.eth.wait_for_transaction_receipt(tx)
         console.print(f"  SBT-бейдж видано soul_id={sbt_soul_id} (attested tier -> 1)")
         console.print(f"  {agent_no_soul.address[:10]}... — Soul НЕ реєструється (навмисно).")
+
+        if config.SETTLEMENT_MODE == "atomic":
+            # Ончейн KYA-гейт роутера читає ОКРЕМИЙ реєстр (MockRouterKYA, заглушка
+            # WB Soul з isVerified(uint256)). Сіємо verified-soul тим самим
+            # верифікованим агентам, щоб атомарний settle проходив. agent_no_soul
+            # НЕ сіємо — його й так відсіює Python-policy до settlement.
+            router_kya = chain.get_contract(w3, "MockRouterKYA", config.ROUTER_KYA_ADDRESS)
+            for i, agent in enumerate(
+                (agent_with_soul, agent_with_soul_and_sbt, agent_veteran, agent_flagged), start=1
+            ):
+                tx = chain.send_contract_tx(w3, deployer_key, router_kya.functions.setSoul(agent.address, i))
+                w3.eth.wait_for_transaction_receipt(tx)
+                tx = chain.send_contract_tx(w3, deployer_key, router_kya.functions.setVerified(i, True))
+                w3.eth.wait_for_transaction_receipt(tx)
+            console.print("  MockRouterKYA засіяно verified-souls для роутерового KYA-гейту (atomic).")
     else:
         console.print(
             "\n[yellow]USE_MOCK_SOUL=false — цей демо-скрипт очікує, що агенти вже "
@@ -320,14 +349,27 @@ def main() -> None:
             _fail_step(f"відхилено з неочікуваної причини: {exc}")
 
     console.print("\n[bold]Крок 11 — повторне пред'явлення тієї ж авторизації (replay)[/bold]")
-    payload = agent_client.build_and_sign_authorization(
-        agent_with_soul.key.hex(),
-        config.FACILITATOR_WALLET_ADDRESS,
-        config.RESOURCE_PRICE_WEI,
-        "/photo/kyiv-sofia-cathedral",
-        config.TEURC_ADDRESS,
-        w3.eth.chain_id,
-    )
+    if config.SETTLEMENT_MODE == "atomic":
+        payload = agent_client.build_and_sign_authorization(
+            agent_with_soul.key.hex(),
+            config.ROUTER_ADDRESS,
+            config.RESOURCE_PRICE_WEI,
+            "/photo/kyiv-sofia-cathedral",
+            config.TEURC_ADDRESS,
+            w3.eth.chain_id,
+            settlement_mode="atomic",
+            seller=config.SERVICE_PROVIDER_WALLET_ADDRESS,
+            fee_bps=config.FACILITATOR_FEE_BPS,
+        )
+    else:
+        payload = agent_client.build_and_sign_authorization(
+            agent_with_soul.key.hex(),
+            config.FACILITATOR_WALLET_ADDRESS,
+            config.RESOURCE_PRICE_WEI,
+            "/photo/kyiv-sofia-cathedral",
+            config.TEURC_ADDRESS,
+            w3.eth.chain_id,
+        )
     replay_url = f"{provider_url}/photo/kyiv-sofia-cathedral"
     first = requests.post(replay_url, json=payload, timeout=15)
     second = requests.post(replay_url, json=payload, timeout=15)

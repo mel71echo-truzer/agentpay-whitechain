@@ -56,6 +56,11 @@ _ARTIFACT_PATHS = {
         _ARTIFACTS_DIR / "mocks" / "MockSoulBoundTokenCollection.sol" / "MockSoulBoundTokenCollection.json"
     ),
     "MockSoulRegistry": _ARTIFACTS_DIR / "mocks" / "MockSoulRegistry.sol" / "MockSoulRegistry.json",
+    # Фаза 2.5 (atomic settlement): роутер + мок-KYA під нього. MockRouterKYA —
+    # заглушка WB Soul для роутерового ISoulRegistry.isVerified(uint256), якого
+    # атрибутний MockSoulRegistry не реалізує (див. MockRouterKYA.sol).
+    "AgentPayRouter": _ARTIFACTS_DIR / "AgentPayRouter.sol" / "AgentPayRouter.json",
+    "MockRouterKYA": _ARTIFACTS_DIR / "mocks" / "MockRouterKYA.sol" / "MockRouterKYA.json",
     "ISoulRegistry": _ARTIFACTS_DIR / "interfaces" / "ISoulRegistry.sol" / "ISoulRegistry.json",
     "ISoulAttributeRegistry": (
         _ARTIFACTS_DIR / "interfaces" / "ISoulAttributeRegistry.sol" / "ISoulAttributeRegistry.json"

@@ -77,8 +77,45 @@ npx hardhat run deploy/deploy.ts --network whitechain_testnet
 ```
 
 This deploys `tEURC` always, and — if `USE_MOCK_SOUL=true` — the mock Soul
-stack too. It prints the resulting addresses in `.env` `KEY=VALUE` form.
+stack too. It **also** deploys the Phase 2.5 atomic stack: `MockRouterKYA` (a
+WB Soul stub) and `AgentPayRouter`, allow-lists your `FACILITATOR_WALLET_ADDRESS`
+as a relayer, and transfers router ownership to `TREASURY_ADDRESS` (the fee
+recipient; defaults to the facilitator if unset). It prints all resulting
+addresses in `.env` `KEY=VALUE` form — including `SETTLEMENT_MODE=atomic`,
+`ROUTER_ADDRESS`, `TREASURY_ADDRESS`, `ROUTER_KYA_ADDRESS`.
 **Copy that block into your `.env`.**
+
+### Choosing the settlement backend (`SETTLEMENT_MODE`)
+
+- `legacy` — off-chain relay then a second forward tx (facilitator briefly
+  custodies funds; a relay-ok/forward-failed case is journaled as *funds held*,
+  see `GET /admin/held-settlements`).
+- `atomic` — `AgentPayRouter.settlePaymentAtomic`: receive + fee-split + payout
+  in one transaction, so no funds-held window exists. Fund-moving parameters are
+  bound into the buyer's signature (finding C-1, closed).
+
+The deploy block sets `SETTLEMENT_MODE=atomic`. If you want the legacy path
+instead, set `SETTLEMENT_MODE=legacy` in `.env` (the router can stay deployed
+and unused).
+
+**KYA in atomic mode is a stub on testnet.** `AgentPayRouter` gates payers via
+`ISoulRegistry.isVerified(uint256)`, which the real attribute-based WB Soul does
+**not** expose — so the router is deployed against `MockRouterKYA`. Before an
+agent can pay in atomic mode, seed a verified soul for it in that stub (owner is
+open — anyone can call):
+
+```python
+import chain, config
+w3 = chain.get_w3()
+kya = chain.get_contract(w3, "MockRouterKYA", config.ROUTER_KYA_ADDRESS)
+key = config.DEPLOYER_PRIVATE_KEY
+for i, buyer in enumerate([config.AUTHOR_WALLET_ADDRESS], start=1):
+    w3.eth.wait_for_transaction_receipt(chain.send_contract_tx(w3, key, kya.functions.setSoul(buyer, i)))
+    w3.eth.wait_for_transaction_receipt(chain.send_contract_tx(w3, key, kya.functions.setVerified(i, True)))
+```
+
+A real WB Soul adapter (over `ISoulAttributeRegistry`) replaces this stub once
+the attribute schema is confirmed — see the README "Out of scope" note.
 
 ## 5. Mint yourself some tEURC
 

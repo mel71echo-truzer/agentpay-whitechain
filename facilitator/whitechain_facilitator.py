@@ -36,6 +36,7 @@ from facilitator import events as events_mod  # noqa: E402
 from facilitator import policy as policy_mod  # noqa: E402
 from facilitator.events import EventLog  # noqa: E402
 from facilitator.identity import IdentityReader  # noqa: E402
+from facilitator.atomic_settlement import AtomicSettlementEngine  # noqa: E402
 from facilitator.payment import PaymentValidator  # noqa: E402
 from facilitator.settlement import SettlementEngine, SettlementError, SettlementForwardError  # noqa: E402
 from facilitator.store import Store  # noqa: E402
@@ -69,22 +70,53 @@ class WhitechainFacilitator:
             self.store,
             n_target=config.REPUTATION_N_TARGET,
         )
-        self.payment = PaymentValidator(
-            self.w3,
-            self.teurc,
-            facilitator_address=config.FACILITATOR_WALLET_ADDRESS,
-            teurc_decimals=config.TEURC_DECIMALS,
-        )
-        self.settlement = SettlementEngine(
-            self.w3,
-            self.teurc,
-            facilitator_private_key=config.FACILITATOR_WALLET_PRIVATE_KEY,
-            service_provider_address=config.SERVICE_PROVIDER_WALLET_ADDRESS,
-            fee_bps=config.FACILITATOR_FEE_BPS,
-            teurc_decimals=config.TEURC_DECIMALS,
-            wait_for_confirmation=config.WAIT_FOR_CONFIRMATION,
-            confirmation_timeout=config.SETTLEMENT_CONFIRMATION_TIMEOUT,
-        )
+        # --- payment + settlement: обираємо backend за SETTLEMENT_MODE ---
+        # Обидва тримають ОДИН seam: validate_authorization(...) -> message і
+        # settle(message, authorization) -> {6 ключів}. Клас-оркестратор нижче
+        # (verify_and_settle) НЕ знає, який backend активний — код той самий.
+        if config.SETTLEMENT_MODE == "atomic":
+            # Атомарний шлях: підпис ReceiveWithAuthorization на роутер, похідний
+            # nonce (C-1), розрахунок однією tx (без вікна funds-held).
+            router = chain.get_contract(self.w3, "AgentPayRouter", config.ROUTER_ADDRESS)
+            self.payment = PaymentValidator(
+                self.w3,
+                self.teurc,
+                facilitator_address=config.FACILITATOR_WALLET_ADDRESS,
+                teurc_decimals=config.TEURC_DECIMALS,
+                settlement_mode="atomic",
+                router_address=config.ROUTER_ADDRESS,
+                seller_address=config.SERVICE_PROVIDER_WALLET_ADDRESS,
+                fee_bps=config.FACILITATOR_FEE_BPS,
+            )
+            self.settlement = AtomicSettlementEngine(
+                self.w3,
+                self.teurc,
+                router,
+                facilitator_private_key=config.FACILITATOR_WALLET_PRIVATE_KEY,
+                treasury_address=config.TREASURY_ADDRESS,
+                fee_bps=config.FACILITATOR_FEE_BPS,
+                teurc_decimals=config.TEURC_DECIMALS,
+                wait_for_confirmation=config.WAIT_FOR_CONFIRMATION,
+                confirmation_timeout=config.SETTLEMENT_CONFIRMATION_TIMEOUT,
+            )
+        else:
+            # legacy (дефолт під час розробки): офчейн relay + forward нетто.
+            self.payment = PaymentValidator(
+                self.w3,
+                self.teurc,
+                facilitator_address=config.FACILITATOR_WALLET_ADDRESS,
+                teurc_decimals=config.TEURC_DECIMALS,
+            )
+            self.settlement = SettlementEngine(
+                self.w3,
+                self.teurc,
+                facilitator_private_key=config.FACILITATOR_WALLET_PRIVATE_KEY,
+                service_provider_address=config.SERVICE_PROVIDER_WALLET_ADDRESS,
+                fee_bps=config.FACILITATOR_FEE_BPS,
+                teurc_decimals=config.TEURC_DECIMALS,
+                wait_for_confirmation=config.WAIT_FOR_CONFIRMATION,
+                confirmation_timeout=config.SETTLEMENT_CONFIRMATION_TIMEOUT,
+            )
         self.events = EventLog(self.store)
 
     def _assert_correct_chain(self) -> None:

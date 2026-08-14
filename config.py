@@ -106,6 +106,28 @@ PREMIUM_MIN_REPUTATION_TIER = _int_env("PREMIUM_MIN_REPUTATION_TIER", 1)
 # Комісія facilitator-а з кожного платежу, у базисних пунктах (50 = 0.5%).
 FACILITATOR_FEE_BPS = _int_env("FACILITATOR_FEE_BPS", 50)
 
+# --- Фаза 2.5: атомарний settlement через AgentPayRouter ---
+# legacy -> офчейн relay+forward (SettlementEngine: дві tx, є вікно часткового
+#           збою «списано-але-не-переслано», яке звіряється журналом F3).
+# atomic -> AgentPayRouter.settlePaymentAtomic: одна tx (receive+split), тож
+#           стану funds-held не існує в принципі. Прив'язку продавця/суми/
+#           комісії/ресурсу до підпису закрито у C-1 (contracts/AgentPayRouter.sol).
+# Дефолт — ATOMIC: розрахунок однією tx (receive+split) без вікна funds-held,
+# із прив'язкою продавця/суми/комісії/ресурсу до підпису (C-1 закрито). Legacy
+# (relay+forward) лишається доступним через SETTLEMENT_MODE=legacy для швидкого
+# офчейн-демо чи мереж без розгорнутого роутера. Перемкнено на atomic після
+# того, як інтеграційний тест atomic-шляху став зеленим (KROK 3).
+SETTLEMENT_MODE = os.getenv("SETTLEMENT_MODE", "atomic").strip().lower()
+# Адреса розгорнутого AgentPayRouter (потрібна лише в atomic-режимі).
+ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "")
+# KYA-реєстр роутера (MockRouterKYA — заглушка WB Soul). Потрібен, щоб засіяти
+# verified-soul покупцям на testnet; локальне demo деплоїть і сіє його саме.
+ROUTER_KYA_ADDRESS = os.getenv("ROUTER_KYA_ADDRESS", "")
+# Скарбниця: owner роутера й отримувач комісії у atomic-режимі. За замовчуванням
+# — гаманець facilitator-а (щоб demo працював без окремого казначейського
+# гаманця; у legacy комісія так само осідає у facilitator-а).
+TREASURY_ADDRESS = os.getenv("TREASURY_ADDRESS", "") or FACILITATOR_WALLET_ADDRESS
+
 # --- Ліміт витрат агента-автора на завдання ---
 AUTHOR_MAX_SPEND_WEI = _price_wei_env("AUTHOR_MAX_SPEND_TEURC", "1.0")
 SPEND_LEDGER_PATH = os.getenv("SPEND_LEDGER_PATH", ".spend_ledger.json")
