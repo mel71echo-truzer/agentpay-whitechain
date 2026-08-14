@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ATOMIC SETTLEMENT ROUTER — wired into the live path behind SETTLEMENT_MODE=atomic.
@@ -66,7 +67,7 @@ interface ISoulRegistry {
  * @notice Atomic escrow + fee-split router for agent-to-agent payments, with
  *         every fund-moving parameter bound to the buyer's EIP-3009 signature.
  */
-contract AgentPayRouter is Ownable, ReentrancyGuard {
+contract AgentPayRouter is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public immutable teurcToken;
@@ -93,8 +94,14 @@ contract AgentPayRouter is Ownable, ReentrancyGuard {
     error KYACheckFailed();
     error NotRelayer();
     error FeeTooHigh();
+    /// @notice A constructor address argument was the zero address.
+    error ZeroAddress();
 
+    /// @param _teurcToken The tEURC token this router settles (immutable).
+    /// @param _soulRegistry The KYA registry gating payers (immutable). On
+    ///        testnet/local this is MockRouterKYA; see router_kya_adapter.py.
     constructor(address _teurcToken, address _soulRegistry) Ownable(msg.sender) {
+        if (_teurcToken == address(0) || _soulRegistry == address(0)) revert ZeroAddress();
         teurcToken = _teurcToken;
         soulRegistry = _soulRegistry;
     }

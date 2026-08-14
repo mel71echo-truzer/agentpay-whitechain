@@ -101,10 +101,16 @@ async function main() {
   }
 
   // owner() = скарбниця (отримувач комісії). Дефолт — facilitator, якщо TREASURY не заданий.
+  // Роутер — Ownable2Step: transferOwnership лише ІНІЦІЮЄ передачу (ставить
+  // pendingOwner); нова адреса має сама викликати acceptOwnership(). Доки не
+  // прийнято — owner() лишається deployer-ом (і комісія йде йому). Це навмисно:
+  // помилкова адреса не може тихо забрати всі майбутні комісії.
   const treasury = process.env.TREASURY_ADDRESS || facilitator;
   if (treasury && treasury.toLowerCase() !== deployer.address.toLowerCase()) {
     await (await router.transferOwnership(treasury)).wait();
-    console.log(`  transferOwnership(${treasury}) — treasury owns router / receives fees`);
+    console.log(`  transferOwnership(${treasury}) — ІНІЦІЙОВАНО (2-step).`);
+    console.log(`  ⚠ Скарбниця має підтвердити: router.acceptOwnership() з адреси ${treasury},`);
+    console.log("    інакше owner() (отримувач комісії) лишається deployer-ом.");
   } else {
     console.log("  Router owner stays the deployer (no distinct TREASURY_ADDRESS set).");
   }

@@ -116,8 +116,9 @@ describe("tEURC", function () {
 
     await teurc.connect(relayer).transferWithAuthorization(...args);
 
-    await expect(teurc.connect(relayer).transferWithAuthorization(...args)).to.be.revertedWith(
-      "tEURC: authorization is used or canceled"
+    await expect(teurc.connect(relayer).transferWithAuthorization(...args)).to.be.revertedWithCustomError(
+      teurc,
+      "AuthorizationAlreadyUsed"
     );
   });
 
@@ -149,7 +150,7 @@ describe("tEURC", function () {
           sig.r,
           sig.s
         )
-    ).to.be.revertedWith("tEURC: authorization is not yet valid");
+    ).to.be.revertedWithCustomError(teurc, "AuthorizationNotYetValid");
   });
 
   it("transferWithAuthorization: reverts after validBefore (expired)", async function () {
@@ -182,7 +183,7 @@ describe("tEURC", function () {
           sig.r,
           sig.s
         )
-    ).to.be.revertedWith("tEURC: authorization is expired");
+    ).to.be.revertedWithCustomError(teurc, "AuthorizationExpired");
   });
 
   it("transferWithAuthorization: reverts on a forged signature (wrong signer)", async function () {
@@ -214,7 +215,7 @@ describe("tEURC", function () {
           sig.r,
           sig.s
         )
-    ).to.be.revertedWith("tEURC: invalid signature");
+    ).to.be.revertedWithCustomError(teurc, "InvalidSignature");
   });
 
   it("receiveWithAuthorization: reverts if caller is not the payee", async function () {
@@ -245,7 +246,84 @@ describe("tEURC", function () {
           sig.r,
           sig.s
         )
-    ).to.be.revertedWith("tEURC: caller must be the payee");
+    ).to.be.revertedWithCustomError(teurc, "CallerNotPayee");
+  });
+
+  it("cancelAuthorization: signer voids an unused nonce; a later transfer with it reverts", async function () {
+    const { teurc, relayer, payee, from, domain } = await deployFixture();
+
+    const now = BigInt(await time.latest());
+    const auth = {
+      from: from.address,
+      to: payee.address,
+      value: ONE,
+      validAfter: 0n,
+      validBefore: now + 3600n,
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+    };
+    const transferSig = await signTransferAuth(from, domain, auth);
+
+    // `from` signs a CancelAuthorization over (authorizer, nonce).
+    const cancelTypes = {
+      CancelAuthorization: [
+        { name: "authorizer", type: "address" },
+        { name: "nonce", type: "bytes32" },
+      ],
+    };
+    const cancelSignature = await from.signTypedData(domain, cancelTypes, {
+      authorizer: from.address,
+      nonce: auth.nonce,
+    });
+    const cancelSig = ethers.Signature.from(cancelSignature);
+
+    // Anyone can relay the cancel; it voids the nonce and emits the event.
+    await expect(
+      teurc.connect(relayer).cancelAuthorization(from.address, auth.nonce, cancelSig.v, cancelSig.r, cancelSig.s)
+    )
+      .to.emit(teurc, "AuthorizationCanceled")
+      .withArgs(from.address, auth.nonce);
+
+    expect(await teurc.authorizationState(from.address, auth.nonce)).to.equal(true);
+
+    // The originally-signed transfer with that nonce now reverts (already used).
+    await expect(
+      teurc
+        .connect(relayer)
+        .transferWithAuthorization(
+          auth.from,
+          auth.to,
+          auth.value,
+          auth.validAfter,
+          auth.validBefore,
+          auth.nonce,
+          transferSig.v,
+          transferSig.r,
+          transferSig.s
+        )
+    ).to.be.revertedWithCustomError(teurc, "AuthorizationAlreadyUsed");
+  });
+
+  it("cancelAuthorization: reverts on a forged cancel signature", async function () {
+    const { teurc, relayer, from, domain } = await deployFixture();
+    const impostor = ethers.Wallet.createRandom().connect(ethers.provider);
+    const nonce = ethers.hexlify(ethers.randomBytes(32));
+
+    const cancelTypes = {
+      CancelAuthorization: [
+        { name: "authorizer", type: "address" },
+        { name: "nonce", type: "bytes32" },
+      ],
+    };
+    // Impostor signs a cancel claiming to be `from`.
+    const cancelSignature = await impostor.signTypedData(domain, cancelTypes, {
+      authorizer: from.address,
+      nonce,
+    });
+    const cancelSig = ethers.Signature.from(cancelSignature);
+
+    await expect(
+      teurc.connect(relayer).cancelAuthorization(from.address, nonce, cancelSig.v, cancelSig.r, cancelSig.s)
+    ).to.be.revertedWithCustomError(teurc, "InvalidSignature");
   });
 
   it("permit (EIP-2612): approves via off-chain signature", async function () {

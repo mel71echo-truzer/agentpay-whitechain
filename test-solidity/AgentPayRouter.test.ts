@@ -131,7 +131,7 @@ describe("AgentPayRouter — atomic settlement + C-1 seller-binding", function (
       router
         .connect(relayer)
         .settlePaymentAtomic(buyer.address, attacker.address, AMOUNT, FEE_BPS, 0n, validBefore, RESOURCE_HASH, v, r, s),
-    ).to.be.revertedWith("tEURC: invalid signature");
+    ).to.be.revertedWithCustomError(tEURC, "InvalidSignature");
     expect(await tEURC.balanceOf(attacker.address)).to.equal(0n);
   });
 
@@ -147,7 +147,7 @@ describe("AgentPayRouter — atomic settlement + C-1 seller-binding", function (
       router
         .connect(relayer)
         .settlePaymentAtomic(buyer.address, honestSeller.address, AMOUNT * 2n, FEE_BPS, 0n, validBefore, RESOURCE_HASH, v, r, s),
-    ).to.be.revertedWith("tEURC: invalid signature");
+    ).to.be.revertedWithCustomError(tEURC, "InvalidSignature");
   });
 
   it("attack #2b: relayer changes feeBps away from what was signed -> revert (split is bound)", async function () {
@@ -161,7 +161,7 @@ describe("AgentPayRouter — atomic settlement + C-1 seller-binding", function (
       router
         .connect(relayer)
         .settlePaymentAtomic(buyer.address, honestSeller.address, AMOUNT, 900, 0n, validBefore, RESOURCE_HASH, v, r, s),
-    ).to.be.revertedWith("tEURC: invalid signature");
+    ).to.be.revertedWithCustomError(tEURC, "InvalidSignature");
   });
 
   it("attack #2c: feeBps above the hard cap -> FeeTooHigh (defence in depth)", async function () {
@@ -205,7 +205,7 @@ describe("AgentPayRouter — atomic settlement + C-1 seller-binding", function (
       router
         .connect(relayer)
         .settlePaymentAtomic(buyer.address, honestSeller.address, AMOUNT, FEE_BPS, 0n, validBefore, RESOURCE_HASH, v, r, s),
-    ).to.be.revertedWith("tEURC: authorization is used or canceled");
+    ).to.be.revertedWithCustomError(tEURC, "AuthorizationAlreadyUsed");
   });
 
   // ---- KYA gate still enforced ----
