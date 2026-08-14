@@ -1,14 +1,22 @@
 # AgentPay on Whitechain
 
-> **Status: proof-of-concept / MVP.** This is **not** a production payment
-> network. No escrow, no dispute resolution, no mainnet settlement yet — see
-> [Out of scope](#out-of-scope-phase-3) for what's deliberately not here.
-> The payment core (tEURC/EIP-3009 + the KYA/reputation gate + the modular
-> facilitator) has been verified end-to-end locally (`scripts/demo.py`,
-> Solidity + pytest suites) and is **now also deployed and run end-to-end on real Whitechain
-> testnet** — see [`TESTNET_DEPLOYMENT.md`](TESTNET_DEPLOYMENT.md) for live addresses and results, [Step 0](#step-0-network--wb-soul-recon) for context, and
-> [`DEPLOY_WHITECHAIN.md`](DEPLOY_WHITECHAIN.md) for how to do that deploy
-> yourself.
+> **Status: audit-ready testnet PoC (pre-production).** The payment core
+> (tEURC/EIP-3009 + the KYA/reputation gate + the modular facilitator) is
+> hardened for external review — OpenZeppelin, custom errors, `Ownable2Step`,
+> reentrancy guards, Slither-clean router, **Python 96% / production-contract
+> 100% test coverage** ([`COVERAGE.md`](COVERAGE.md)) — and is deployed and run
+> end-to-end on real Whitechain testnet ([`TESTNET_DEPLOYMENT.md`](TESTNET_DEPLOYMENT.md)).
+> It is **not yet production**: no external audit has been commissioned (planned),
+> WB Soul is mocked on testnet (WhiteBIT hasn't published testnet addresses), and
+> there's no escrow/dispute resolution. See [`SECURITY.md`](SECURITY.md) for the
+> threat model and [Out of scope](#out-of-scope-phase-3) for what's deliberately
+> not here.
+>
+> **Documentation:** [`ARCHITECTURE.md`](ARCHITECTURE.md) (how it works) ·
+> [`INTEGRATION.md`](INTEGRATION.md) (how to connect) ·
+> [`SECURITY.md`](SECURITY.md) (threat model + audit status) ·
+> [`DEPLOY_WHITECHAIN.md`](DEPLOY_WHITECHAIN.md) (testnet deploy) ·
+> [`DEMO.md`](DEMO.md) (reproducible demo) · [`agentpay_sdk/`](agentpay_sdk/README.md) (SDK).
 
 **AgentPay is a trust layer for the AI-agent economy; payments are one
 service.** The hard part of agents transacting autonomously isn't moving a
