@@ -333,5 +333,9 @@ async def pay_for_photo(name: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
 
+    import logging_setup
+
+    logging_setup.configure_logging(level=config.LOG_LEVEL, fmt=config.LOG_FORMAT)
+    config.require_valid_startup()  # fail fast зі зрозумілим списком, якщо .env неповний
     init_facilitator(WhitechainFacilitator())  # fail fast тут, якщо RPC/chain не той
     uvicorn.run(app, host=config.SERVICE_PROVIDER_HOST, port=config.SERVICE_PROVIDER_PORT)

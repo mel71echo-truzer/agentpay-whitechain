@@ -144,3 +144,58 @@ REPUTATION_N_TARGET = _int_env("REPUTATION_N_TARGET", 20)
 STORE_DB_PATH = os.getenv("STORE_DB_PATH", ".agentpay.db")
 # Тип можливості, який публікує наш AI Service Provider у Capability Registry.
 CAPABILITY_TYPE = os.getenv("CAPABILITY_TYPE", "image-generation")
+
+# --- Логування (див. logging_setup.configure_logging) ---
+# LOG_FORMAT: "text" (людяно, дефолт) | "json" (структуроване, для прод-пайплайнів).
+# LOG_LEVEL: DEBUG|INFO|WARNING|ERROR (дефолт INFO). Секрети НІКОЛИ не логуються.
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+
+def validate_startup(network: str | None = None) -> list[str]:
+    """Повертає список проблем конфігу для заданої мережі (порожній = все ок).
+
+    Fail-fast на старті сервера/деплою: краще один зрозумілий список того, чого
+    бракує, ніж падіння десь глибше в потоці. Секретів НЕ друкує — лише НАЗВИ
+    відсутніх змінних. Для NETWORK=local нічого не вимагає (demo/тести сіють усе
+    самі). Для whitechain_testnet вимагає RPC, ключі й адреси контрактів; в
+    atomic-режимі — ще й ROUTER_ADDRESS/ROUTER_KYA_ADDRESS."""
+    net = network or NETWORK
+    problems: list[str] = []
+    if net == "local":
+        return problems
+
+    required = {
+        "WHITECHAIN_TESTNET_RPC": WHITECHAIN_TESTNET_RPC,
+        "DEPLOYER_PRIVATE_KEY": DEPLOYER_PRIVATE_KEY,
+        "TEURC_ADDRESS": TEURC_ADDRESS,
+        "FACILITATOR_WALLET_ADDRESS": FACILITATOR_WALLET_ADDRESS,
+        "FACILITATOR_WALLET_PRIVATE_KEY": FACILITATOR_WALLET_PRIVATE_KEY,
+        "SERVICE_PROVIDER_WALLET_ADDRESS": SERVICE_PROVIDER_WALLET_ADDRESS,
+        "SOUL_REGISTRY_ADDRESS": SOUL_REGISTRY_ADDRESS,
+        "SOUL_ATTRIBUTE_REGISTRY_ADDRESS": SOUL_ATTRIBUTE_REGISTRY_ADDRESS,
+        "SOUL_BOUND_TOKEN_REGISTRY_ADDRESS": SOUL_BOUND_TOKEN_REGISTRY_ADDRESS,
+        "IS_VERIFIED_ATTRIBUTE_ADDRESS": IS_VERIFIED_ATTRIBUTE_ADDRESS,
+    }
+    if SETTLEMENT_MODE == "atomic":
+        required["ROUTER_ADDRESS"] = ROUTER_ADDRESS
+        required["ROUTER_KYA_ADDRESS"] = ROUTER_KYA_ADDRESS
+
+    for name, value in required.items():
+        if not value:
+            problems.append(f"{name} не заданий (потрібен для NETWORK={net})")
+
+    if FACILITATOR_FEE_BPS < 0 or FACILITATOR_FEE_BPS > 1000:
+        problems.append(f"FACILITATOR_FEE_BPS={FACILITATOR_FEE_BPS} поза діапазоном 0..1000 (0..10%)")
+    if SETTLEMENT_MODE not in ("atomic", "legacy"):
+        problems.append(f"SETTLEMENT_MODE='{SETTLEMENT_MODE}' невідомий (очікується atomic|legacy)")
+    return problems
+
+
+def require_valid_startup(network: str | None = None) -> None:
+    """Кидає RuntimeError зі зведеним списком проблем, якщо конфіг неповний."""
+    problems = validate_startup(network)
+    if problems:
+        raise RuntimeError(
+            "Конфіг неповний для старту:\n  - " + "\n  - ".join(problems) + "\nДив. DEPLOY_WHITECHAIN.md / .env.example."
+        )

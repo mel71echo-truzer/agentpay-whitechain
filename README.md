@@ -279,6 +279,22 @@ the faucet, fill in `.env`, deploy, then run the exact same
 `python scripts/demo.py` with `NETWORK=whitechain_testnet` set. No code
 changes.
 
+### Integrate as a developer (SDK)
+
+A third-party agent buys a resource in a handful of lines via the
+[`agentpay_sdk`](agentpay_sdk/README.md) package:
+
+```python
+from agentpay_sdk import AgentPayClient
+
+client = AgentPayClient(private_key="0x…", registry_url="http://localhost:8000", chain_id=2625)
+result = client.purchase("image-generation", "/photo/kyiv-lavra")   # 402 → sign → settle, handled for you
+open("kyiv.png", "wb").write(result.content)
+```
+
+Runnable end-to-end (no testnet needed): `python examples/quickstart.py`. Full
+guide in [`agentpay_sdk/README.md`](agentpay_sdk/README.md).
+
 ## Project Structure
 
 ```

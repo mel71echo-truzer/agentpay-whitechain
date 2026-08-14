@@ -11,12 +11,14 @@ branch = True
 source =
     facilitator
     service_provider
+    agentpay_sdk
     config
     money
     chain
     agent_client
     registry_auth
     router_binding
+    logging_setup
 omit =
     tests/*
     scripts/*
