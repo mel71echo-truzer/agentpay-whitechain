@@ -24,6 +24,7 @@ from web3 import Web3  # noqa: E402
 
 import agent_client  # noqa: E402
 from unified.adapters import StandardX402Adapter  # noqa: E402
+from unified.adapters.payment_validator import UnifiedPaymentValidator  # noqa: E402
 from unified.adapters.settlement import FacilitatorSettlementEngine  # noqa: E402
 from unified.adapters.trust import FacilitatorTrustGate  # noqa: E402
 from unified.payment import PaymentAuthorization  # noqa: E402
@@ -73,12 +74,15 @@ def _registry_with_two_weather_services(fx) -> UnifiedRegistry:
     return reg
 
 
-def _server_for(fx, service) -> UnifiedResourceServer:
+def _server_for(fx, service, *, on_telemetry=None) -> UnifiedResourceServer:
     return UnifiedResourceServer(
         adapter=StandardX402Adapter(),
         trust_gate=FacilitatorTrustGate(fx.facilitator.identity),
         settlement=FacilitatorSettlementEngine(fx.facilitator.settlement),
+        payment_validator=UnifiedPaymentValidator(chain_id=fx.w3.eth.chain_id, asset_address=fx.teurc.address,
+                                                   token=fx.teurc),  # enables off-chain replay pre-check
         service=service, resource=RESOURCE, asset_address=fx.teurc.address, min_reputation_tier=0,
+        on_telemetry=on_telemetry,
     )
 
 
@@ -131,3 +135,37 @@ def test_unified_e2e_unverified_agent_denied_at_trust_gate(facilitator_setup):
     r = client.get(RESOURCE, headers={"X-PAYMENT": header})
     assert r.status_code == 402
     assert r.json()["policy_decision"] == "deny:not-kya"      # denied BEFORE any money moved
+
+
+def test_unified_e2e_scenario_c_invalid_x_payment_rejected(facilitator_setup):
+    """Scenario C — a malformed/invalid X-PAYMENT is rejected, no settlement."""
+    fx = facilitator_setup
+    reg = _registry_with_two_weather_services(fx)
+    chosen = MarketplaceSelector().select(reg.discover(category="weather"), "weather")
+    client = TestClient(build_unified_resource_app(_server_for(fx, chosen.service)))
+
+    # garbage header → 400, money moved = false
+    assert client.get(RESOURCE, headers={"X-PAYMENT": "not-a-valid-header"}).status_code == 400
+
+    # a well-formed header but WRONG amount (underpay) → 402 payment-validation, no settlement
+    bad = _sign_x_payment(fx, fx.verified_no_sbt_agent, RESOURCE, 1, chosen.service.provider.pay_to)
+    r = client.get(RESOURCE, headers={"X-PAYMENT": bad})
+    assert r.status_code == 402
+    assert r.json()["stage"] == "payment-validation"
+    assert "amount" in r.json()["error"].lower()
+
+
+def test_unified_e2e_replay_same_authorization_rejected(facilitator_setup):
+    """STEP 4 — idempotency/replay: the SAME authorization settles once; a second
+    submission is rejected on-chain (tEURC nonce is the source of truth)."""
+    fx = facilitator_setup
+    reg = _registry_with_two_weather_services(fx)
+    chosen = MarketplaceSelector().select(reg.discover(category="weather"), "weather")
+    client = TestClient(build_unified_resource_app(_server_for(fx, chosen.service)))
+
+    header = _sign_x_payment(fx, fx.verified_no_sbt_agent, RESOURCE, chosen.service.price_units,
+                             chosen.service.provider.pay_to)
+    first = client.get(RESOURCE, headers={"X-PAYMENT": header})
+    assert first.status_code == 200                     # settled once
+    second = client.get(RESOURCE, headers={"X-PAYMENT": header})
+    assert second.status_code == 402                    # nonce already used on-chain → not settled again

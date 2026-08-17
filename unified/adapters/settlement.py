@@ -105,6 +105,15 @@ class FacilitatorSettlementEngine:
                 amount_units=amount,
                 reason="Internal settlement error, please retry later.",
             )
+        except Exception:  # noqa: BLE001 — a raw chain error (e.g. an on-chain revert on a
+            # replayed nonce during gas estimation) must never escape as an unhandled
+            # exception. Surface it as FAILED; nothing moved. Detail stays in logs.
+            return SettlementResult(
+                status=SettlementStatus.FAILED,
+                asset=self._asset,
+                amount_units=amount,
+                reason="Settlement rejected on-chain (e.g. used authorization).",
+            )
 
         return SettlementResult(
             status=SettlementStatus.CONFIRMED if res.get("confirmed") else SettlementStatus.SUBMITTED,

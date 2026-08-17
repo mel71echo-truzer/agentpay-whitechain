@@ -12,6 +12,7 @@ source =
     facilitator
     service_provider
     agentpay_sdk
+    unified
     config
     money
     chain

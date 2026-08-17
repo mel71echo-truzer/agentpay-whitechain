@@ -164,3 +164,33 @@ integration. It is **not** removed.
 After every phase, this must still be reproducible end-to-end:
 `agent → discovery → x402 → payment → settlement → result`. The working testnet
 flow is a product asset; no refactor may quietly break it.
+
+---
+
+## Phase 5 additions — payment validation & observability
+
+The seller-side pipeline gained an explicit **payment-validation stage** before
+the TrustGate (a gap found in the Phase 5 audit: the server was settling whatever
+the buyer signed). Full flow now:
+
+```
+X-PAYMENT → PaymentValidation → TrustGate → SettlementEngine → Result
+             (amount / payTo /    (KYA/SBT/   (tEURC, hidden)
+              asset / window /      policy)
+              signature; optional
+              off-chain replay)
+```
+
+- `unified/adapters/payment_validator.py` (`UnifiedPaymentValidator`): off-chain
+  EIP-712 recovery + amount/payTo/asset/network/window checks. Rejections return
+  402 **before** any settlement (settlement is never called). Nonce replay stays
+  on-chain in tEURC (source of truth); an optional off-chain pre-check runs when a
+  token handle is supplied.
+- `unified/telemetry.py` (`PaymentTelemetry`): one structured record per request
+  (request_id, provider_id, service_id, selected_score, trust_decision,
+  payment_amount, asset, settlement_status, tx_hash, failure_reason). Carries no
+  secrets by construction; a guard rejects secret-like keys. Emitted via an
+  optional `on_telemetry` callback on `UnifiedResourceServer`.
+
+Invariant enforced by tests: **settlement is never reached on any pre-settlement
+rejection** (`tests/test_unified_failure_paths.py` asserts `settle.called == False`).
