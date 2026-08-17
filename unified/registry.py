@@ -42,6 +42,7 @@ class RegistryRecord:
     listing: dict                # exactly registry_auth.SIGNED_FIELDS
     signature: str               # seller signature over `listing` only
     quality: QualityMetrics      # attached by the registry, not the seller
+    asset: PaymentAsset = PaymentAsset.TEURC  # settlement asset (canonical default; apUSD for compat)
     owner: str = ""              # recovered signer (== listing['id']); set on verify
 
 
@@ -57,15 +58,25 @@ class UnifiedRegistry:
     def __init__(self):
         self._records: list[RegistryRecord] = []
 
-    def register(self, listing: dict, signature: str, quality: QualityMetrics) -> RegistryRecord:
+    def register(
+        self,
+        listing: dict,
+        signature: str,
+        quality: QualityMetrics,
+        *,
+        asset: PaymentAsset = PaymentAsset.TEURC,
+    ) -> RegistryRecord:
         """Verify the seller's signature over the listing, then store it with the
-        registry's OWN quality attestation. Raises ValueError on a bad signature.
-        Any quality-looking keys inside `listing` are irrelevant — they are not
-        signed and are never read as quality."""
+        registry's OWN quality attestation and settlement asset. Raises ValueError
+        on a bad signature. Any quality-looking keys inside `listing` are irrelevant
+        — they are not signed and are never read as quality. `asset` defaults to the
+        canonical tEURC; pass PaymentAsset.APUSD for a compatibility listing."""
         owner = registry_auth.verify_registration(listing, signature)  # raises on tamper / id!=signer
         # Keep only the canonical signed fields; a seller can't smuggle quality in.
         clean_listing = {k: listing[k] for k in registry_auth.SIGNED_FIELDS}
-        record = RegistryRecord(listing=clean_listing, signature=signature, quality=quality, owner=owner)
+        record = RegistryRecord(
+            listing=clean_listing, signature=signature, quality=quality, asset=asset, owner=owner
+        )
         self._records.append(record)
         return record
 
@@ -95,7 +106,7 @@ class UnifiedRegistry:
             url=str(listing["provider_url"]),
             category=capability,
             price_units=int(listing["price_wei"]),
-            currency=PaymentAsset.TEURC.value,
+            currency=record.asset.value,   # canonical tEURC by default; apUSD preserved for compat
             network="whitechain-testnet",
             # quality strictly from the registry attestation, not the seller:
             rating=float(record.quality.rating),

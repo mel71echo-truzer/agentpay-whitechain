@@ -73,6 +73,16 @@ class FacilitatorSettlementEngine:
         # Lazy import so this module is importable without pulling web3 unless used.
         from facilitator.settlement import SettlementError, SettlementForwardError
 
+        # Asset guard: never settle an authorization for a different asset than this
+        # engine handles (keeps tEURC and apUSD paths from being confused).
+        if authorization.asset is not self._asset:
+            return SettlementResult(
+                status=SettlementStatus.FAILED,
+                asset=self._asset,
+                amount_units=int(authorization.value_units),
+                reason=f"Asset mismatch: authorization is {authorization.asset.value}, engine settles {self._asset.value}.",
+            )
+
         message, auth_dict = authorization_to_engine_inputs(authorization)
         amount = message["value"]
         try:

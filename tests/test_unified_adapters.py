@@ -134,6 +134,17 @@ def test_settlement_adapter_maps_submitted():
     assert eng.settle(_auth()).status is SettlementStatus.SUBMITTED
 
 
+def test_settlement_adapter_rejects_asset_mismatch():
+    # A tEURC engine must refuse an apUSD authorization (no wrapped call happens).
+    engine = FacilitatorSettlementEngine(_FakeEngine(result={"confirmed": True}), asset=PaymentAsset.TEURC)
+    apusd_auth = PaymentAuthorization(from_address="0xa", to_address="0xb", value_units=5000,
+                                      valid_after=0, valid_before=1, nonce="0x00", signature=SIG,
+                                      asset=PaymentAsset.APUSD)
+    res = engine.settle(apusd_auth)
+    assert res.status is SettlementStatus.FAILED
+    assert "mismatch" in res.reason.lower()
+
+
 def test_settlement_adapter_maps_funds_held_and_failed():
     from facilitator.settlement import SettlementError, SettlementForwardError
     held = FacilitatorSettlementEngine(_FakeEngine(exc=SettlementForwardError(
