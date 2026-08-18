@@ -138,6 +138,7 @@ class UnifiedResourceServer:
             expected_amount_units=self.service.price_units,
             expected_pay_to=self.service.provider.pay_to,
             expected_network=self.service.network,
+            expected_resource=self.resource,   # H-2: canonical resource for atomic binding
         )
         if not vr.ok:
             tel.failure_reason = f"payment invalid: {vr.reason}"

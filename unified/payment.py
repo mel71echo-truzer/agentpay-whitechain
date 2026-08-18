@@ -43,6 +43,12 @@ class PaymentAuthorization:
     asset_address: Optional[str] = None
     network: str = "whitechain-testnet"
     resource: Optional[str] = None  # the resource this authorization is bound to
+    # H-2: atomic resource-binding inputs carried in the X-PAYMENT payload (not the
+    # envelope). `salt` lets the server re-derive keccak(resource‖salt) from the
+    # CANONICAL resource; `mode` selects legacy vs atomic (ReceiveWithAuthorization
+    # + derived nonce). Absent → legacy (backwards-compatible).
+    salt: Optional[str] = None      # 0x… 32-byte client salt (atomic binding)
+    mode: str = "legacy"            # "legacy" | "atomic"
     extra: dict = field(default_factory=dict)
 
 

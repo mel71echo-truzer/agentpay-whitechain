@@ -55,21 +55,28 @@ class StandardX402Adapter:
     def encode_x_payment_header(self, authorization: PaymentAuthorization, *, scheme: str = "exact") -> str:
         """Encode a PaymentAuthorization into the base64 `X-PAYMENT` header value.
         Mirrors x402/common.encode_payment_header exactly."""
+        inner = {
+            "authorization": {
+                "from": authorization.from_address,
+                "to": authorization.to_address,
+                "value": str(int(authorization.value_units)),
+                "validAfter": authorization.valid_after,
+                "validBefore": authorization.valid_before,
+                "nonce": authorization.nonce,
+            },
+            "signature": authorization.signature,
+        }
+        # H-2: atomic binding travels IN the payload (the X-PAYMENT envelope format
+        # is unchanged). Legacy authorizations carry neither key.
+        if authorization.mode == "atomic":
+            inner["mode"] = "atomic"
+            if authorization.salt is not None:
+                inner["salt"] = authorization.salt
         payload = {
             "x402Version": 1,
             "scheme": scheme,
             "network": authorization.network,
-            "payload": {
-                "authorization": {
-                    "from": authorization.from_address,
-                    "to": authorization.to_address,
-                    "value": str(int(authorization.value_units)),
-                    "validAfter": authorization.valid_after,
-                    "validBefore": authorization.valid_before,
-                    "nonce": authorization.nonce,
-                },
-                "signature": authorization.signature,
-            },
+            "payload": inner,
         }
         return base64.b64encode(json.dumps(payload).encode()).decode()
 
@@ -92,6 +99,8 @@ class StandardX402Adapter:
                 signature=signature,
                 asset=PaymentAsset.TEURC,  # canonical default; asset_address carried separately in the 402
                 network=network,
+                mode=inner.get("mode", "legacy"),   # H-2: atomic binding, if present
+                salt=inner.get("salt"),
             )
         except (KeyError, ValueError, TypeError, json.JSONDecodeError, base64.binascii.Error) as exc:
             raise ValueError(f"Malformed X-PAYMENT header: {exc}") from exc
