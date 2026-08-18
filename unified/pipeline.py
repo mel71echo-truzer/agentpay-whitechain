@@ -23,7 +23,7 @@ from typing import Callable, Optional
 from unified.models import Provider, Service
 from unified.payment import X402PaymentAdapter
 from unified.scoring import ScoreBreakdown, compose_final_score
-from unified.settlement import SettlementEngine
+from unified.settlement import SettlementEngine, SettlementStatus
 from unified.telemetry import PaymentTelemetry
 from unified.trust_gate import TrustGate
 
@@ -172,24 +172,40 @@ class UnifiedResourceServer:
         result = self.settlement.settle(auth)
         tel.settlement_status = result.status.value
         tel.tx_hash = result.relay_tx_hash
-        if not result.ok:
-            tel.failure_reason = result.reason
-            self._emit(tel)
-            return 402, {"error": result.reason, "settlement_status": result.status.value}
 
-        self._emit(tel)
-        return 200, {
-            "result": "SERVICE RESULT",
-            "reputation_tier": decision.reputation_tier,
-            "settlement": {
-                "status": result.status.value,
-                "asset": result.asset.value,
-                "amount_units": result.amount_units,
-                "fee_units": result.fee_units,
-                "net_units": result.net_units,
+        # M-2: the resource is released ONLY on CONFIRMED. A merely-broadcast
+        # (SUBMITTED) settlement is NOT a success — return an explicit 202 pending
+        # WITHOUT the service result, so nothing is handed out before the payment is
+        # mined. FUNDS_HELD / FAILED are 402. There is no path where SUBMITTED → 200.
+        if result.is_confirmed:
+            self._emit(tel)
+            return 200, {
+                "result": "SERVICE RESULT",
+                "reputation_tier": decision.reputation_tier,
+                "settlement": {
+                    "status": result.status.value,
+                    "asset": result.asset.value,
+                    "amount_units": result.amount_units,
+                    "fee_units": result.fee_units,
+                    "net_units": result.net_units,
+                    "relay_tx_hash": result.relay_tx_hash,
+                },
+            }
+
+        if result.status is SettlementStatus.SUBMITTED:
+            tel.failure_reason = "settlement submitted, awaiting confirmation"
+            self._emit(tel)
+            return 202, {
+                "status": "pending",
+                "settlement_status": result.status.value,
                 "relay_tx_hash": result.relay_tx_hash,
-            },
-        }
+                "detail": "Payment submitted; the resource is released only after on-chain confirmation.",
+            }
+
+        # FUNDS_HELD / FAILED — money did not settle to the seller.
+        tel.failure_reason = result.reason
+        self._emit(tel)
+        return 402, {"error": result.reason, "settlement_status": result.status.value}
 
 
 def build_unified_resource_app(server: UnifiedResourceServer):

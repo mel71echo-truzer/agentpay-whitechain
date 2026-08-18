@@ -192,6 +192,25 @@ def test_funds_held_reported():
     assert body["settlement_status"] == "funds_held"
 
 
+# ---- M-2: resource released ONLY on CONFIRMED ----
+def test_confirmed_releases_resource_200():
+    spy = SpySettlement()  # default CONFIRMED
+    status, body = _server(settlement=spy).fulfill(_header())
+    assert status == 200 and body["result"] == "SERVICE RESULT"
+    assert body["settlement"]["status"] == "confirmed"
+
+
+def test_submitted_is_pending_202_not_released():
+    spy = SpySettlement(SettlementResult(SettlementStatus.SUBMITTED, PaymentAsset.TEURC, PRICE,
+                                         relay_tx_hash="0xbroadcast", reason=""))
+    status, body = _server(settlement=spy).fulfill(_header())
+    assert status == 202                              # explicit pending, NOT 200
+    assert body["status"] == "pending"
+    assert body["settlement_status"] == "submitted"
+    assert "result" not in body                       # resource NOT released before confirmation
+    assert spy.called is True                          # settlement did happen (broadcast)
+
+
 # ---- 16. duplicate nonce / replay (validator off-chain pre-check via token) ----
 def test_duplicate_nonce_pre_checked():
     class _UsedToken:

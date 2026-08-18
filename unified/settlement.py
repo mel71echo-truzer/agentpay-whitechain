@@ -47,7 +47,16 @@ class SettlementResult:
 
     @property
     def ok(self) -> bool:
+        """Money moved or is in flight (not FAILED/FUNDS_HELD). NOT a release signal —
+        use `is_confirmed` to decide whether to hand over the resource (M-2)."""
         return self.status in (SettlementStatus.CONFIRMED, SettlementStatus.SUBMITTED)
+
+    @property
+    def is_confirmed(self) -> bool:
+        """M-2: the ONLY state in which the resource may be released — the relay is
+        mined and, in atomic mode, the split is complete. SUBMITTED (broadcast, not
+        yet mined) is NOT confirmed and must not release the resource."""
+        return self.status is SettlementStatus.CONFIRMED
 
 
 @runtime_checkable
