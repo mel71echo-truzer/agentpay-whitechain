@@ -130,6 +130,11 @@ class UnifiedResourceServer:
             self._emit(tel)
             return 400, {"error": "Malformed X-PAYMENT header."}
 
+        # Pin the CANONICAL resource server-side (never trust a client-supplied one).
+        # The atomic settlement engine derives resourceHash = keccak(resource‖salt)
+        # from this; the validator likewise checks against expected_resource below.
+        auth.resource = self.resource
+
         # 1. PAYMENT VALIDATION (amount / payTo / asset / window / signature) —
         #    off-chain, BEFORE trust + settlement, ALWAYS (fail-closed, H-1). No money
         #    or gas moves on failure. The validator is guaranteed present (constructor).

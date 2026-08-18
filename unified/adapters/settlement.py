@@ -126,3 +126,89 @@ class FacilitatorSettlementEngine:
             reason="Settled.",
             details={"status": res.get("status")},
         )
+
+
+class AtomicFacilitatorSettlementEngine:
+    """Canonical SettlementEngine for the ATOMIC path (H-3).
+
+    Wraps `facilitator.atomic_settlement.AtomicSettlementEngine`, whose settle
+    routes through `AgentPayRouter.settlePaymentAtomic` — where the ON-CHAIN
+    security boundary lives: `isRelayer(msg.sender)`, `_requireKYA(from)`, the
+    derived-nonce resource/seller/fee binding, and receive-with-authorization.
+
+    C-1 preserved: `seller` and `fee_bps` come from THIS server's config (never the
+    client), and `resource_hash` is derived from the CANONICAL resource + the
+    client salt (`authorization.resource` is set by the pipeline to its own
+    resource). The client cannot influence any of them.
+    """
+
+    def __init__(self, atomic_engine, *, seller: str, fee_bps: int, router_address: str,
+                 asset: PaymentAsset = PaymentAsset.TEURC):
+        self._engine = atomic_engine
+        self._seller = seller
+        self._fee_bps = int(fee_bps)
+        self._router_address = router_address
+        self._asset = asset
+
+    @property
+    def supported_asset(self) -> PaymentAsset:
+        return self._asset
+
+    def settle(self, authorization: PaymentAuthorization) -> SettlementResult:
+        import router_binding
+        from facilitator.settlement import SettlementError
+
+        amount = int(authorization.value_units)
+
+        if authorization.asset is not self._asset:
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount,
+                                    reason=f"Asset mismatch: {authorization.asset.value} vs {self._asset.value}.")
+        if authorization.mode != "atomic" or not authorization.salt or not authorization.resource:
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount,
+                                    reason="Atomic settlement requires an atomic authorization with resource+salt.")
+        if authorization.to_address.lower() != str(self._router_address).lower():
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount,
+                                    reason="Atomic authorization payee is not the router.")
+
+        try:
+            salt_bytes = bytes.fromhex(authorization.salt[2:] if authorization.salt.startswith("0x") else authorization.salt)
+            resource_hash = router_binding.resource_hash(authorization.resource, salt_bytes)
+            v, r, s = _split_signature(authorization.signature)
+        except Exception:  # noqa: BLE001 — malformed inputs are a clean FAILED, nothing moves
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount, reason="Malformed atomic authorization.")
+
+        # seller / feeBps / resourceHash are SERVER-supplied (C-1); the router
+        # recomputes the nonce from them on-chain and tEURC reverts if they don't
+        # match what the buyer signed.
+        message = {
+            "from": authorization.from_address,
+            "seller": self._seller,
+            "value": amount,
+            "feeBps": self._fee_bps,
+            "validAfter": int(authorization.valid_after),
+            "validBefore": int(authorization.valid_before),
+            "resourceHash": resource_hash,
+        }
+        auth_dict = {"v": v, "r": r, "s": s}
+
+        try:
+            res = self._engine.settle(message, auth_dict)
+        except SettlementError:
+            # on-chain reject (non-KYA / not-relayer / bad binding / replay) — nothing moved.
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount,
+                                    reason="Atomic settlement rejected on-chain (KYA/relayer/binding/replay).")
+        except Exception:  # noqa: BLE001 — any raw chain error must not escape
+            return SettlementResult(SettlementStatus.FAILED, self._asset, amount,
+                                    reason="Atomic settlement failed on-chain.")
+
+        return SettlementResult(
+            status=SettlementStatus.CONFIRMED if res.get("confirmed") else SettlementStatus.SUBMITTED,
+            asset=self._asset,
+            amount_units=amount,
+            fee_units=int(res.get("fee_wei", 0)),
+            net_units=int(res.get("net_wei", 0)),
+            relay_tx_hash=res.get("relay_tx_hash"),
+            forward_tx_hash=res.get("forward_tx_hash"),
+            reason="Settled (atomic).",
+            details={"status": res.get("status")},
+        )
