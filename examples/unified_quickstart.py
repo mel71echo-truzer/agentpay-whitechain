@@ -23,6 +23,7 @@ import agent_client
 import chain
 import config
 from unified.adapters import StandardX402Adapter
+from unified.adapters.payment_validator import UnifiedPaymentValidator
 from unified.adapters.settlement import FacilitatorSettlementEngine
 from unified.adapters.trust import FacilitatorTrustGate
 from unified.payment import PaymentAuthorization
@@ -108,11 +109,12 @@ def main() -> None:
     chosen = MarketplaceSelector().select(services, "weather", budget_units=100_000)
     print(f"   → selected {chosen.service.price_units} units (final={chosen.breakdown.final_score:.3f})")
 
-    # --- SERVER: standard x402 + TrustGate + SettlementEngine ---
+    # --- SERVER: standard x402 + PaymentValidator (mandatory) + TrustGate + SettlementEngine ---
     server = UnifiedResourceServer(
         adapter=StandardX402Adapter(),
         trust_gate=FacilitatorTrustGate(fac.identity),
         settlement=FacilitatorSettlementEngine(fac.settlement),
+        payment_validator=UnifiedPaymentValidator(chain_id=w3.eth.chain_id, asset_address=teurc),
         service=chosen.service, resource=RESOURCE, asset_address=teurc, min_reputation_tier=0,
     )
     accept = server.payment_required()["accepts"][0]

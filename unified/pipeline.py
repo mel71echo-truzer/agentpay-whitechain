@@ -71,10 +71,22 @@ class UnifiedResourceServer:
         service: Service,
         resource: str,
         asset_address: str,
+        payment_validator,
         min_reputation_tier: int = 0,
-        payment_validator=None,
         on_telemetry: Optional[Callable[[PaymentTelemetry], None]] = None,
     ):
+        # H-1 (fail-closed): payment validation is MANDATORY. There is no way to
+        # construct the server — or reach TrustGate/Settlement — without a validator.
+        # `payment_validator` is a required keyword arg; a missing one is a TypeError,
+        # and an explicit None is rejected here. This closes the Phase-6 finding that
+        # the validator was optional (a buyer could otherwise underpay / mis-route).
+        if payment_validator is None:
+            raise ValueError(
+                "payment_validator is required (fail-closed). Provide a UnifiedPaymentValidator "
+                "so amount/payTo/asset/window/signature are validated before trust + settlement."
+            )
+        if not hasattr(payment_validator, "validate"):
+            raise TypeError("payment_validator must expose a validate(...) method.")
         self.adapter = adapter
         self.trust_gate = trust_gate
         self.settlement = settlement
@@ -82,9 +94,6 @@ class UnifiedResourceServer:
         self.resource = resource
         self.asset_address = asset_address
         self.min_reputation_tier = min_reputation_tier
-        # Off-chain payment validation (amount/payTo/asset/window/signature) BEFORE
-        # trust + settlement. Optional for backwards-compat, but STRONGLY recommended
-        # (without it a buyer could underpay or mis-route; see payment_validator.py).
         self.payment_validator = payment_validator
         self.on_telemetry = on_telemetry
 
@@ -122,18 +131,18 @@ class UnifiedResourceServer:
             return 400, {"error": "Malformed X-PAYMENT header."}
 
         # 1. PAYMENT VALIDATION (amount / payTo / asset / window / signature) —
-        #    off-chain, BEFORE trust + settlement. No money or gas moves on failure.
-        if self.payment_validator is not None:
-            vr = self.payment_validator.validate(
-                auth,
-                expected_amount_units=self.service.price_units,
-                expected_pay_to=self.service.provider.pay_to,
-                expected_network=self.service.network,
-            )
-            if not vr.ok:
-                tel.failure_reason = f"payment invalid: {vr.reason}"
-                self._emit(tel)
-                return 402, {"error": vr.reason, "stage": "payment-validation"}
+        #    off-chain, BEFORE trust + settlement, ALWAYS (fail-closed, H-1). No money
+        #    or gas moves on failure. The validator is guaranteed present (constructor).
+        vr = self.payment_validator.validate(
+            auth,
+            expected_amount_units=self.service.price_units,
+            expected_pay_to=self.service.provider.pay_to,
+            expected_network=self.service.network,
+        )
+        if not vr.ok:
+            tel.failure_reason = f"payment invalid: {vr.reason}"
+            self._emit(tel)
+            return 402, {"error": vr.reason, "stage": "payment-validation"}
 
         # 2. TRUST GATE — separate, hard, before any money moves. Gates the PAYER's
         #    on-chain identity (KYA/SBT/policy). Not mixed with marketplace score.

@@ -213,6 +213,43 @@ def test_duplicate_nonce_pre_checked():
     assert "replay" in body["error"].lower()
 
 
+# ---- H-1: PaymentValidator is mandatory / fail-closed ----
+def test_server_cannot_be_built_without_validator():
+    common = dict(adapter=StandardX402Adapter(), trust_gate=SpyGate(ALLOW), settlement=SpySettlement(),
+                  service=_service(), resource=RESOURCE, asset_address=ASSET)
+    # missing entirely -> TypeError (required keyword arg)
+    with pytest.raises(TypeError):
+        UnifiedResourceServer(**common)
+    # explicit None -> ValueError (fail-closed)
+    with pytest.raises(ValueError):
+        UnifiedResourceServer(**common, payment_validator=None)
+    # a bogus object without validate() -> TypeError
+    with pytest.raises(TypeError):
+        UnifiedResourceServer(**common, payment_validator=object())
+
+
+def test_every_fulfill_runs_validation_first():
+    # Spy validator records it was called; a rejecting one must stop before settlement.
+    class _RejectValidator:
+        def __init__(self):
+            self.called = False
+
+        def validate(self, auth, **kw):
+            self.called = True
+            from unified.adapters.payment_validator import ValidationResult
+            return ValidationResult(False, "rejected by validator")
+
+    v = _RejectValidator()
+    spy = SpySettlement()
+    server = UnifiedResourceServer(adapter=StandardX402Adapter(), trust_gate=SpyGate(ALLOW),
+                                   settlement=spy, service=_service(), resource=RESOURCE,
+                                   asset_address=ASSET, payment_validator=v)
+    status, body = server.fulfill(_header())
+    assert v.called is True                 # validation ran
+    assert status == 402 and spy.called is False  # never reached settlement
+    assert body["stage"] == "payment-validation"
+
+
 # ---- 17. registry tampering (anti-forge invariant) ----
 def test_registry_tampering_rejected():
     from unified.registry import QualityMetrics, UnifiedRegistry, sign_listing
