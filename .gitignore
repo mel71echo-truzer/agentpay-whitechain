@@ -24,3 +24,5 @@ coverage.xml
 # solidity-coverage (Istanbul) output
 coverage/
 coverage.json
+# Real Testnet Gate A–F evidence output
+gate_evidence/
