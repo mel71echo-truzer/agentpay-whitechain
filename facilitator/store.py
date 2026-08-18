@@ -35,7 +35,31 @@ except ImportError:  # Windows
 #   2 — money-type міграція: capabilities.price -> price_wei INTEGER (09b3a4c).
 #   3 — підписана реєстрація (F4 #A): capabilities += owner_address, pay_to,
 #       signature, created_at; вибір провайдера за серверним created_at/rowid.
-CURRENT_SCHEMA_VERSION = 3
+#   4 — M-3 reconciliation: нова таблиця reconciliation (облік FUNDS_HELD із
+#       ідемпотентним станом-машиною). Таблиці 1-3 недоторкані.
+CURRENT_SCHEMA_VERSION = 4
+
+# --- M-3 reconciliation states ---------------------------------------------
+# FUNDS_HELD-розрахунки живуть тут як ОБЛІК із ідемпотентним станом-машиною —
+# НЕ як фейкова гарантія повернення. RESOLVED_* — термінальні й ставляться ЛИШЕ
+# після фактичного on-chain підтвердження трансферу (або self-heal), щоб
+# reconciliation не повторив помилку M-2 (RESOLVED без підтвердження).
+#
+#   HELD ──forward──▶ FORWARD_SUBMITTED ──on-chain confirmed──▶ RESOLVED_FORWARDED
+#   HELD ──refund_request──▶ REFUND_PENDING ──refund_execute──▶
+#                            REFUND_SUBMITTED ──confirmed──▶ RESOLVED_REFUNDED
+#
+# forward відновлює початкову економічну операцію (facilitator уже отримав кошти
+# продавця й має передати їх продавцю). refund ЗМІНЮЄ економічний результат, тож
+# HELD→REFUND_PENDING лише СТВОРЮЄ заявку (без переказу); фактичний переказ — це
+# окремий, свідомий крок refund_execute.
+RECON_HELD = "held"
+RECON_FORWARD_SUBMITTED = "forward_submitted"
+RECON_RESOLVED_FORWARDED = "resolved_forwarded"
+RECON_REFUND_PENDING = "refund_pending"
+RECON_REFUND_SUBMITTED = "refund_submitted"
+RECON_RESOLVED_REFUNDED = "resolved_refunded"
+RECON_TERMINAL = frozenset({RECON_RESOLVED_FORWARDED, RECON_RESOLVED_REFUNDED})
 
 
 class StoreLockError(RuntimeError):
@@ -170,6 +194,17 @@ class Store:
                     signature TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS reconciliation (
+                    relay_tx_hash TEXT PRIMARY KEY,
+                    net_wei INTEGER NOT NULL,
+                    seller TEXT NOT NULL,
+                    buyer TEXT NOT NULL,
+                    nonce TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    action_tx_hash TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
 
@@ -255,6 +290,69 @@ class Store:
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+    # -------------------- reconciliation (M-3) --------------------
+
+    def record_held(self, relay_tx_hash: str, *, net_wei: int, seller: str, buyer: str, nonce: str) -> dict:
+        """Реєструє утриманий (FUNDS_HELD) розрахунок для звірки. ІДЕМПОТЕНТНО:
+        `relay_tx_hash` — первинний ключ, тож повторна реєстрація того самого
+        релею НЕ скидає стан (розрахунок, що вже реконсилюється, не відкочується
+        назад у HELD). Повертає ПОТОЧНИЙ рядок (новий або наявний)."""
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO reconciliation
+                    (relay_tx_hash, net_wei, seller, buyer, nonce, state, action_tx_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(relay_tx_hash) DO NOTHING
+                """,
+                (relay_tx_hash, int(net_wei), seller, buyer, nonce, RECON_HELD, now, now),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM reconciliation WHERE relay_tx_hash = ?", (relay_tx_hash,)
+            ).fetchone()
+        return dict(row)
+
+    def get_reconciliation(self, relay_tx_hash: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM reconciliation WHERE relay_tx_hash = ?", (relay_tx_hash,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_reconciliation(self, *, state: str | None = None, limit: int = 100) -> list[dict]:
+        conditions, params = [], []
+        if state:
+            conditions.append("state = ?")
+            params.append(state)
+        query = "SELECT * FROM reconciliation"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_reconciliation(self, relay_tx_hash: str, *, state: str, action_tx_hash: str | None = None) -> dict:
+        """Оновлює стан (і, за потреби, action_tx_hash) утриманого розрахунку.
+        `action_tx_hash=None` НЕ стирає наявний (COALESCE), щоб перехід стану без
+        нової дії зберігав tx попередньої спроби. Повертає оновлений рядок."""
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE reconciliation
+                   SET state = ?, action_tx_hash = COALESCE(?, action_tx_hash), updated_at = ?
+                 WHERE relay_tx_hash = ?
+                """,
+                (state, action_tx_hash, now, relay_tx_hash),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM reconciliation WHERE relay_tx_hash = ?", (relay_tx_hash,)
+            ).fetchone()
+        return dict(row)
 
     # -------------------- capabilities --------------------
 

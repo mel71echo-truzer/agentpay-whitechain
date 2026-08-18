@@ -39,6 +39,7 @@ from facilitator.identity import IdentityReader  # noqa: E402
 from facilitator.atomic_settlement import AtomicSettlementEngine  # noqa: E402
 from facilitator.payment import PaymentValidator  # noqa: E402
 from facilitator.settlement import SettlementEngine, SettlementError, SettlementForwardError  # noqa: E402
+from facilitator import store as store_mod  # noqa: E402
 from facilitator.store import Store  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,16 @@ class WhitechainFacilitator:
                 exc.relay_tx_hash, exc.net_wei, exc,
             )
             emit(events_mod.SETTLEMENT_FUNDS_HELD, tx_hash=exc.relay_tx_hash)
+            # M-3: персиститься достатньо, щоб held був АДРЕСОВАНИЙ пізніше
+            # (сума/продавець/покупець/nonce), а не лише tx_hash у логах.
+            # Ідемпотентно за relay_tx_hash. Це ОБЛІК — не рух коштів.
+            self.store.record_held(
+                exc.relay_tx_hash,
+                net_wei=exc.net_wei,
+                seller=config.SERVICE_PROVIDER_WALLET_ADDRESS,
+                buyer=from_addr,
+                nonce=self._nonce_str(validation["message"]["nonce"]),
+            )
             return self._deny(
                 "Кошти утримані, зобов'язання не виконане (форвард сервісу "
                 "відкотився). Розрахунок зафіксовано для звірки.",
@@ -243,6 +254,191 @@ class WhitechainFacilitator:
         команда може простежити суму on-chain і провести форвард вручну.
         БЕЗ авто-ретраю — це навмисно окреме рішення, не сайд-ефект."""
         return self.store.list_events(event_type=events_mod.SETTLEMENT_FUNDS_HELD, limit=limit)
+
+    # ==================== M-3: reconciliation ====================
+    # Облік + повторна перевірка + ідемпотентний стан-машина. НЕ фейкова гарантія
+    # повернення: facilitator фізично тримає net_wei (стандартний ERC-20) і може
+    # переслати його продавцю (forward) або повернути покупцю (refund). Кожен рух
+    # коштів — ЯВНА операторська дія, з on-chain перевіркою ПЕРЕД переказом і
+    # переходом у RESOLVED_* ЛИШЕ після фактичного on-chain підтвердження
+    # (паритет з M-2: жодного «resolved» без підтвердження). `.sol`, atomic-шлях і
+    # авто-ретрай НЕ чіпаються.
+
+    @staticmethod
+    def _nonce_str(nonce) -> str:
+        """Стабільний рядковий вигляд EIP-3009 nonce для обліку (bytes32|hex|str)."""
+        if isinstance(nonce, (bytes, bytearray)):
+            return "0x" + bytes(nonce).hex()
+        return str(nonce)
+
+    def list_reconciliation(self, *, state: str | None = None, limit: int = 100) -> list[dict]:
+        """Повний облік звірки (усі стани або відфільтрований). На відміну від
+        list_held_settlements (сирий журнал подій) — це стан-машина з полями
+        net_wei/seller/buyer/nonce/state/action_tx_hash."""
+        return self.store.list_reconciliation(state=state, limit=limit)
+
+    def _receipt_status(self, tx_hash: str | None) -> str:
+        """('confirmed'|'reverted'|'pending') за on-chain receipt. Відсутній
+        receipt => 'pending' (ще не змайнено). Ключ self-heal + анти-подвійного руху."""
+        from web3.exceptions import TransactionNotFound
+
+        if not tx_hash:
+            return "pending"
+        try:
+            receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return "pending"
+        return "confirmed" if receipt.status == 1 else "reverted"
+
+    def _confirm_tx(self, tx_hash: str) -> bool:
+        """Чекає підтвердження в межах вікна. True лише при status==1. Таймаут/
+        відкат => False (розрахунок лишається *_SUBMITTED і придатний до повторної
+        звірки — без нового переказу, якщо tx насправді пройшов: див. self-heal)."""
+        try:
+            receipt = self.w3.eth.wait_for_transaction_receipt(
+                tx_hash, timeout=config.SETTLEMENT_CONFIRMATION_TIMEOUT
+            )
+        except Exception:  # noqa: BLE001 — таймаут/RPC: не термінально, лишаємось SUBMITTED
+            return False
+        return receipt.status == 1
+
+    def _broadcast_transfer(self, to_address: str, amount_wei: int) -> str:
+        """facilitator → to_address на amount_wei tEURC (стандартний ERC-20 transfer)."""
+        return chain.send_contract_tx(
+            self.w3,
+            config.FACILITATOR_WALLET_PRIVATE_KEY,
+            self.teurc.functions.transfer(Web3.to_checksum_address(to_address), int(amount_wei)),
+        )
+
+    @staticmethod
+    def _recon_result(rec: dict, *, ok: bool, changed: bool, moved_funds: bool, detail: str, action: str, dry_run: bool) -> dict:
+        return {
+            "ok": ok,
+            "action": action,
+            "dry_run": dry_run,
+            "relay_tx_hash": rec["relay_tx_hash"],
+            "state": rec["state"],
+            "changed": changed,
+            "moved_funds": moved_funds,
+            "action_tx_hash": rec.get("action_tx_hash"),
+            "net_wei": rec["net_wei"],
+            "seller": rec["seller"],
+            "buyer": rec["buyer"],
+            "detail": detail,
+        }
+
+    def reconcile_held(self, relay_tx_hash: str, action: str, *, dry_run: bool = True) -> dict:
+        """Керована звірка одного утриманого розрахунку. `action` ∈
+        {'forward','refund_request','refund_execute'}. `dry_run=True` (дефолт)
+        НІЧОГО не рухає й нічого не змінює — лише показує намір. Ідемпотентно:
+        повторний виклик у термінальному стані = no-op без руху коштів."""
+        S = store_mod
+        if action not in ("forward", "refund_request", "refund_execute"):
+            return {"ok": False, "action": action, "dry_run": dry_run,
+                    "relay_tx_hash": relay_tx_hash, "detail": f"Невідома дія '{action}'."}
+
+        rec = self.store.get_reconciliation(relay_tx_hash)
+        if rec is None:
+            return {"ok": False, "action": action, "dry_run": dry_run,
+                    "relay_tx_hash": relay_tx_hash, "detail": "Невідомий утриманий розрахунок."}
+        state = rec["state"]
+
+        # ---------------- forward ----------------
+        if action == "forward":
+            if state == S.RECON_RESOLVED_FORWARDED:
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail="Уже переслано (idempotent no-op).", action=action, dry_run=dry_run)
+            if state in (S.RECON_RESOLVED_REFUNDED, S.RECON_REFUND_PENDING, S.RECON_REFUND_SUBMITTED):
+                return self._recon_result(rec, ok=False, changed=False, moved_funds=False,
+                                          detail=f"Розрахунок на refund-треку ({state}); forward неможливий.",
+                                          action=action, dry_run=dry_run)
+            # state ∈ {HELD, FORWARD_SUBMITTED}: спершу on-chain re-check попередньої спроби.
+            prior = self._receipt_status(rec["action_tx_hash"])
+            if prior == "confirmed":
+                rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_RESOLVED_FORWARDED)
+                return self._recon_result(rec, ok=True, changed=True, moved_funds=False,
+                                          detail="Self-heal: попередній forward підтверджено on-chain (без нового переказу).",
+                                          action=action, dry_run=dry_run)
+            if prior == "pending" and rec["action_tx_hash"]:
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail="Попередній forward ще в мемпулі; повторно НЕ розсилаю.",
+                                          action=action, dry_run=dry_run)
+            # prior == 'reverted' або action_tx_hash відсутній -> можна (пере)розсилати.
+            if dry_run:
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail=f"DRY RUN: переказав би net_wei={rec['net_wei']} продавцю {rec['seller']}.",
+                                          action=action, dry_run=dry_run)
+            tx = self._broadcast_transfer(rec["seller"], rec["net_wei"])
+            rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_FORWARD_SUBMITTED, action_tx_hash=tx)
+            if self._confirm_tx(tx):
+                rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_RESOLVED_FORWARDED)
+                return self._recon_result(rec, ok=True, changed=True, moved_funds=True,
+                                          detail="Forward підтверджено on-chain.", action=action, dry_run=dry_run)
+            return self._recon_result(rec, ok=True, changed=True, moved_funds=True,
+                                      detail="Forward розіслано; очікує підтвердження (лишається SUBMITTED).",
+                                      action=action, dry_run=dry_run)
+
+        # ---------------- refund_request (лише заявка, БЕЗ переказу) ----------------
+        if action == "refund_request":
+            if state == S.RECON_RESOLVED_REFUNDED:
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail="Уже повернено (idempotent no-op).", action=action, dry_run=dry_run)
+            if state in (S.RECON_REFUND_PENDING, S.RECON_REFUND_SUBMITTED):
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail="Заявку на повернення вже створено (idempotent no-op).",
+                                          action=action, dry_run=dry_run)
+            if state == S.RECON_RESOLVED_FORWARDED:
+                return self._recon_result(rec, ok=False, changed=False, moved_funds=False,
+                                          detail="Уже переслано продавцю; refund неможливий.", action=action, dry_run=dry_run)
+            if state == S.RECON_FORWARD_SUBMITTED:
+                return self._recon_result(rec, ok=False, changed=False, moved_funds=False,
+                                          detail="Forward у польоті; спершу заверши/відкоти його.", action=action, dry_run=dry_run)
+            # state == HELD -> лише створюємо заявку. ЖОДНОГО переказу.
+            if dry_run:
+                return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                          detail="DRY RUN: створив би заявку на повернення (без переказу).",
+                                          action=action, dry_run=dry_run)
+            rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_REFUND_PENDING)
+            return self._recon_result(rec, ok=True, changed=True, moved_funds=False,
+                                      detail="Заявку на повернення створено. Виконання — окремим refund_execute.",
+                                      action=action, dry_run=dry_run)
+
+        # ---------------- refund_execute (окреме, свідоме виконання) ----------------
+        # Виклик refund_execute = операторське підтвердження виконання заявки.
+        if state == S.RECON_RESOLVED_REFUNDED:
+            return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                      detail="Уже повернено (idempotent no-op).", action=action, dry_run=dry_run)
+        if state == S.RECON_RESOLVED_FORWARDED:
+            return self._recon_result(rec, ok=False, changed=False, moved_funds=False,
+                                      detail="Уже переслано продавцю; refund неможливий.", action=action, dry_run=dry_run)
+        if state in (S.RECON_HELD, S.RECON_FORWARD_SUBMITTED):
+            return self._recon_result(rec, ok=False, changed=False, moved_funds=False,
+                                      detail="Повернення не заявлено; спершу refund_request (окрема політика).",
+                                      action=action, dry_run=dry_run)
+        # state ∈ {REFUND_PENDING, REFUND_SUBMITTED}: on-chain re-check попередньої спроби.
+        prior = self._receipt_status(rec["action_tx_hash"])
+        if prior == "confirmed":
+            rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_RESOLVED_REFUNDED)
+            return self._recon_result(rec, ok=True, changed=True, moved_funds=False,
+                                      detail="Self-heal: попереднє повернення підтверджено on-chain (без нового переказу).",
+                                      action=action, dry_run=dry_run)
+        if prior == "pending" and rec["action_tx_hash"]:
+            return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                      detail="Попереднє повернення ще в мемпулі; повторно НЕ розсилаю.",
+                                      action=action, dry_run=dry_run)
+        if dry_run:
+            return self._recon_result(rec, ok=True, changed=False, moved_funds=False,
+                                      detail=f"DRY RUN: повернув би net_wei={rec['net_wei']} покупцю {rec['buyer']}.",
+                                      action=action, dry_run=dry_run)
+        tx = self._broadcast_transfer(rec["buyer"], rec["net_wei"])
+        rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_REFUND_SUBMITTED, action_tx_hash=tx)
+        if self._confirm_tx(tx):
+            rec = self.store.update_reconciliation(relay_tx_hash, state=S.RECON_RESOLVED_REFUNDED)
+            return self._recon_result(rec, ok=True, changed=True, moved_funds=True,
+                                      detail="Повернення підтверджено on-chain.", action=action, dry_run=dry_run)
+        return self._recon_result(rec, ok=True, changed=True, moved_funds=True,
+                                  detail="Повернення розіслано; очікує підтвердження (лишається SUBMITTED).",
+                                  action=action, dry_run=dry_run)
 
     def _deny(self, reason: str, agent_identity: dict, emitted: list[dict]) -> dict:
         return {
